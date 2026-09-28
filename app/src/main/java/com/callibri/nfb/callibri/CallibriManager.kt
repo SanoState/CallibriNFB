@@ -1,0 +1,744 @@
+package com.callibri.nfb.callibri
+
+import android.bluetooth.BluetoothManager
+import android.content.Context
+import android.location.LocationManager
+import android.os.Build
+import android.os.SystemClock
+import android.util.Log
+import com.callibri.nfb.protocol.FRE1Protocol
+import com.neurosdk2.neuro.Callibri
+import com.neurosdk2.neuro.Scanner
+import com.neurosdk2.neuro.Sensor
+import com.neurosdk2.neuro.interfaces.CallibriElectrodeStateChanged
+import com.neurosdk2.neuro.interfaces.CallibriSignalDataReceived
+import com.neurosdk2.neuro.types.CallibriElectrodeState
+import com.neurosdk2.neuro.types.CallibriSignalType
+import com.neurosdk2.neuro.types.SensorCommand
+import com.neurosdk2.neuro.types.SensorFamily
+import com.neurosdk2.neuro.types.SensorInfo
+import com.neurosdk2.neuro.types.SensorParameter
+import com.neurosdk2.neuro.types.SensorSamplingFrequency
+import com.neurosdk2.neuro.types.SensorState
+import java.util.Locale
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+
+/**
+ * All NeuroSDK calls for a single Callibri.
+ *
+ * The README's Kotlin snippets use `Sensor.CallibriSignalDataReceived` and
+ * `SamplingFrequency`. In neurosdk2 1.0.6.18 the callback interfaces live in
+ * `com.neurosdk2.neuro.interfaces`, the command method is `execCommand`, the
+ * rate enum is `SensorSamplingFrequency`, and the EEG preset is
+ * `Callibri.setSignalType(CallibriSignalType.EEG)`.
+ *
+ * Scanner creation, `createSensor`, `connect`, and `execCommand` are blocking,
+ * so they run on a single background thread. Only one sensor is held at a time.
+ */
+class CallibriManager(
+    private val context: Context,
+    private val scope: CoroutineScope,
+    private val onBeforeSignalStart: () -> Unit = {},
+) {
+    private val sdkExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "callibri-sdk")
+    }
+    private val sdkDispatcher = sdkExecutor.asCoroutineDispatcher()
+    private val connectGate = AtomicBoolean(false)
+
+    private val _state = MutableStateFlow(CallibriState())
+    val state: StateFlow<CallibriState> = _state.asStateFlow()
+
+    private val _samplesMicrovolts = MutableSharedFlow<MicrovoltChunk>(
+        extraBufferCapacity = 128,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
+    )
+    val samplesMicrovolts: SharedFlow<MicrovoltChunk> = _samplesMicrovolts.asSharedFlow()
+
+    private var scanner: Scanner? = null
+    private var scanning = false
+    private var scanGeneration = 0
+    private val found = LinkedHashMap<String, SensorInfo>()
+
+    private var sensor: Callibri? = null
+    private var streaming = false
+    private var closingSensor = false
+
+    @Volatile
+    private var acceptingSamples = false
+
+    @Volatile
+    private var signalSession = 0L
+    private var samplesSinceLog = 0
+    private var lastLogAtMs = 0L
+    private var lastLoggedElectrode: ElectrodeContact? = null
+
+    fun refreshRadioState() {
+        scope.launch(sdkDispatcher) {
+            _state.update { it.withRadio() }
+        }
+    }
+
+    fun startScan() {
+        scope.launch(sdkDispatcher) {
+            startScanLocked()
+        }
+    }
+
+    fun stopScan() {
+        scope.launch(sdkDispatcher) {
+            stopScanLocked(updatePhase = true)
+        }
+    }
+
+    fun connect(address: String) {
+        if (!connectGate.compareAndSet(false, true)) {
+            Log.i(TAG, "connect ignored; a connection is already in progress")
+            return
+        }
+        scope.launch(sdkDispatcher) {
+            try {
+                connectLocked(address)
+            } finally {
+                connectGate.set(false)
+            }
+        }
+    }
+
+    fun startEeg() {
+        scope.launch(sdkDispatcher) {
+            try {
+                startSignalLocked()
+            } catch (error: Exception) {
+                Log.e(TAG, "EEG start failed", error)
+                acceptingSamples = false
+                _state.update {
+                    it.copy(
+                        streaming = false,
+                        message = "Couldn't start EEG: ${error.message ?: "unknown error"}",
+                        messageIsError = true,
+                    )
+                }
+            }
+        }
+    }
+
+    fun stopEeg() {
+        scope.launch(sdkDispatcher) {
+            stopSignalLocked()
+        }
+    }
+
+    fun disconnect() {
+        scope.launch(sdkDispatcher) {
+            if (sensor == null) {
+                Log.i(TAG, "disconnect ignored; no sensor")
+                return@launch
+            }
+            releaseSensorLocked(message = "Disconnected.", isError = false)
+        }
+    }
+
+    /** Blocks until the sensor and scanner are released. Safe from onCleared. */
+    fun release() {
+        runBlocking(sdkDispatcher) {
+            releaseSensorLocked(message = null, isError = false)
+            closeScannerLocked()
+        }
+        sdkExecutor.shutdown()
+    }
+
+    private fun startScanLocked() {
+        if (sensor != null || _state.value.phase == SessionPhase.Connecting) {
+            Log.i(TAG, "scan ignored; a sensor session is active")
+            return
+        }
+        if (scanning) {
+            Log.i(TAG, "scan ignored; already scanning")
+            return
+        }
+        val radio = _state.value.withRadio()
+        if (!radio.bluetoothEnabled) {
+            Log.w(TAG, "scan blocked; bluetooth off")
+            _state.update {
+                radio.copy(
+                    phase = SessionPhase.Disconnected,
+                    message = "Bluetooth is off. Turn it on, then scan again.",
+                    messageIsError = true,
+                )
+            }
+            return
+        }
+        if (radio.locationServicesRequired && !radio.locationServicesEnabled) {
+            Log.w(TAG, "scan blocked; location services off")
+            _state.update {
+                radio.copy(
+                    phase = SessionPhase.Disconnected,
+                    message = "Turn on location services, then scan again. Android 10 and earlier need them for Bluetooth scanning.",
+                    messageIsError = true,
+                )
+            }
+            return
+        }
+        if (!CallibriPermissions.hasRuntimePermissions(context)) {
+            Log.w(TAG, "scan blocked; permissions missing")
+            _state.update {
+                radio.copy(
+                    message = "Bluetooth permission is required before scanning.",
+                    messageIsError = true,
+                )
+            }
+            return
+        }
+
+        closeScannerLocked()
+        found.clear()
+        try {
+            val created = Scanner(SensorFamily.SensorLECallibri)
+            val generation = scanGeneration
+            created.sensorsChanged = Scanner.ScannerCallback { _, sensors ->
+                if (sensors == null || generation != scanGeneration) return@ScannerCallback
+                val snapshot = sensors.filterNotNull()
+                scope.launch(sdkDispatcher) {
+                    if (generation == scanGeneration) mergeFound(snapshot)
+                }
+            }
+            scanner = created
+            created.start()
+            scanning = true
+            Log.i(TAG, "scan start")
+            val already = created.sensors
+            if (already != null) mergeFound(already.filterNotNull())
+            _state.update {
+                it.withRadio().copy(
+                    phase = SessionPhase.Scanning,
+                    devices = emptyList(),
+                    message = null,
+                    messageIsError = false,
+                )
+            }
+        } catch (error: Exception) {
+            Log.e(TAG, "scan start failed", error)
+            closeScannerLocked()
+            _state.update {
+                it.copy(
+                    phase = SessionPhase.Disconnected,
+                    message = "Couldn't start scanning: ${error.message ?: "unknown error"}",
+                    messageIsError = true,
+                )
+            }
+        }
+    }
+
+    private fun stopScanLocked(updatePhase: Boolean) {
+        val current = scanner
+        if (current == null || !scanning) return
+        try {
+            current.stop()
+            scanning = false
+            Log.i(TAG, "scan stop")
+        } catch (error: Exception) {
+            scanning = false
+            Log.e(TAG, "scan stop failed", error)
+        }
+        if (updatePhase && sensor == null && _state.value.phase == SessionPhase.Scanning) {
+            _state.update { it.copy(phase = SessionPhase.Disconnected) }
+        }
+    }
+
+    private fun mergeFound(sensors: List<SensorInfo>) {
+        if (scanner == null) return
+        var changed = false
+        for (info in sensors) {
+            if (info.sensFamily != SensorFamily.SensorLECallibri) continue
+            val address = info.address ?: continue
+            if (address.isBlank()) continue
+            if (!found.containsKey(address)) {
+                val name = info.name?.takeIf { it.isNotBlank() } ?: "Callibri"
+                Log.i(TAG, "device found: $name $address")
+                changed = true
+            }
+            found[address] = info
+        }
+        if (!changed && _state.value.devices.size == found.size) return
+        val devices = found.values.map { info ->
+            CallibriDevice(
+                name = info.name?.takeIf { it.isNotBlank() } ?: "Callibri",
+                address = info.address.orEmpty(),
+            )
+        }
+        _state.update { it.copy(devices = devices) }
+    }
+
+    private fun connectLocked(address: String) {
+        if (sensor != null) {
+            Log.i(TAG, "connect ignored; a sensor is already open")
+            _state.update {
+                it.copy(
+                    message = "Disconnect the current Callibri before connecting another.",
+                    messageIsError = true,
+                )
+            }
+            return
+        }
+        val info = found[address]
+        if (info == null) {
+            _state.update {
+                it.copy(
+                    message = "That Callibri is no longer in the scan list. Scan again.",
+                    messageIsError = true,
+                )
+            }
+            return
+        }
+        val activeScanner = scanner
+        if (activeScanner == null) {
+            _state.update {
+                it.copy(
+                    message = "Scan for a Callibri before connecting.",
+                    messageIsError = true,
+                )
+            }
+            return
+        }
+
+        _state.update {
+            it.copy(
+                phase = SessionPhase.Connecting,
+                message = "Connecting… Keep the sensor awake and nearby.",
+                messageIsError = false,
+            )
+        }
+        Log.i(TAG, "connect: ${info.name} ${info.address}")
+        stopScanLocked(updatePhase = false)
+
+        val created = try {
+            activeScanner.createSensor(info)
+        } catch (error: Exception) {
+            Log.e(TAG, "connect failed", error)
+            _state.update {
+                it.copy(
+                    phase = SessionPhase.Disconnected,
+                    message = "Couldn't connect: ${error.message ?: "unknown error"}",
+                    messageIsError = true,
+                )
+            }
+            return
+        }
+
+        val callibri = created as? Callibri
+        if (callibri == null) {
+            Log.e(TAG, "connect failed: sensor type ${created.javaClass.name}")
+            try {
+                created.close()
+            } catch (error: Exception) {
+                Log.e(TAG, "sensor close failed", error)
+            }
+            _state.update {
+                it.copy(
+                    phase = SessionPhase.Disconnected,
+                    message = "The scanner did not return a Callibri sensor.",
+                    messageIsError = true,
+                )
+            }
+            return
+        }
+
+        sensor = callibri
+        closeScannerLocked()
+        wireSensor(callibri)
+
+        if (callibri.state != SensorState.StateInRange) {
+            Log.e(TAG, "connect failed: state ${callibri.state}")
+            releaseSensorLocked("Callibri did not stay connected.", isError = true)
+            return
+        }
+
+        val deviceName = callibri.name?.takeIf { it.isNotBlank() }
+            ?: info.name?.takeIf { it.isNotBlank() }
+            ?: "Callibri"
+        try {
+            configureEeg(callibri)
+        } catch (error: Exception) {
+            Log.e(TAG, "EEG configure failed", error)
+            _state.update {
+                it.copy(
+                    phase = SessionPhase.Connected,
+                    deviceName = deviceName,
+                    deviceAddress = callibri.address ?: info.address,
+                    batteryPercent = readBattery(callibri),
+                    streaming = false,
+                    electrode = null,
+                    message = "Connected, but EEG setup failed: ${error.message ?: "unknown error"}",
+                    messageIsError = true,
+                )
+            }
+            return
+        }
+
+        _state.update {
+            it.copy(
+                phase = SessionPhase.Connected,
+                deviceName = deviceName,
+                deviceAddress = callibri.address ?: info.address,
+                batteryPercent = readBattery(callibri),
+                streaming = false,
+                sampleRateHz = describedRate(callibri),
+                electrode = null,
+                message = null,
+                messageIsError = false,
+            )
+        }
+        try {
+            startSignalLocked()
+        } catch (error: Exception) {
+            Log.e(TAG, "EEG start failed", error)
+            acceptingSamples = false
+            _state.update {
+                it.copy(
+                    streaming = false,
+                    message = "Connected, but EEG did not start: ${error.message ?: "unknown error"}",
+                    messageIsError = true,
+                )
+            }
+        }
+    }
+
+    private fun wireSensor(callibri: Callibri) {
+        callibri.sensorStateChanged = Sensor.SensorStateChanged { state ->
+            Log.i(TAG, "connection state: $state")
+            if (state == SensorState.StateOutOfRange && !closingSensor) {
+                scope.launch(sdkDispatcher) {
+                    if (sensor !== callibri) return@launch
+                    releaseSensorLocked(
+                        message = "Callibri disconnected or went out of range.",
+                        isError = true,
+                    )
+                }
+            }
+        }
+        callibri.batteryChanged = Sensor.BatteryChanged { power ->
+            _state.update { it.copy(batteryPercent = power) }
+        }
+    }
+
+    private fun configureEeg(callibri: Callibri) {
+        callibri.signalType = CallibriSignalType.EEG
+        if (callibri.isSupportedParameter(SensorParameter.ParameterSamplingFrequency)) {
+            callibri.setSamplingFrequency(SensorSamplingFrequency.FrequencyHz250)
+        } else {
+            Log.w(TAG, "sampling frequency parameter is not supported; reading the current rate")
+        }
+        val rate = describedRate(callibri)
+        Log.i(
+            TAG,
+            "configured EEG preset=${callibri.signalType} rate=$rate Hz (${callibri.samplingFrequency}) " +
+                "startSignal=${callibri.isSupportedCommand(SensorCommand.StartSignal)}",
+        )
+        if (rate != FRE1Protocol.SAMPLE_RATE_HZ) {
+            throw IllegalStateException("Callibri sampling rate is $rate Hz; expected ${FRE1Protocol.SAMPLE_RATE_HZ} Hz")
+        }
+    }
+
+    private fun startSignalLocked() {
+        val callibri = sensor ?: run {
+            _state.update {
+                it.copy(
+                    message = "Connect a Callibri before starting EEG.",
+                    messageIsError = true,
+                )
+            }
+            return
+        }
+        if (streaming) {
+            Log.i(TAG, "EEG start ignored; already streaming")
+            return
+        }
+        if (callibri.state != SensorState.StateInRange) {
+            releaseSensorLocked("Callibri disconnected or went out of range.", isError = true)
+            return
+        }
+        if (!callibri.isSupportedCommand(SensorCommand.StartSignal)) {
+            _state.update {
+                it.copy(
+                    message = "This Callibri does not support raw signal.",
+                    messageIsError = true,
+                )
+            }
+            return
+        }
+
+        callibri.callibriElectrodeStateChanged = CallibriElectrodeStateChanged { electrode ->
+            publishElectrode(electrode)
+        }
+        callibri.callibriSignalDataReceived = CallibriSignalDataReceived { packets ->
+            onSignalPackets(packets)
+        }
+        signalSession += 1
+        onBeforeSignalStart()
+        acceptingSamples = true
+        samplesSinceLog = 0
+        lastLogAtMs = SystemClock.elapsedRealtime()
+        try {
+            callibri.execCommand(SensorCommand.StartSignal)
+        } catch (error: Exception) {
+            acceptingSamples = false
+            callibri.callibriSignalDataReceived = null
+            callibri.callibriElectrodeStateChanged = null
+            throw error
+        }
+        streaming = true
+        Log.i(TAG, "EEG start")
+        publishElectrode(readElectrode(callibri))
+        _state.update {
+            it.copy(
+                streaming = true,
+                sampleRateHz = describedRate(callibri),
+                message = null,
+                messageIsError = false,
+            )
+        }
+    }
+
+    private fun stopSignalLocked() {
+        val callibri = sensor ?: return
+        if (!streaming) {
+            Log.i(TAG, "EEG stop ignored; not streaming")
+            return
+        }
+        acceptingSamples = false
+        streaming = false
+        try {
+            callibri.callibriSignalDataReceived = null
+        } catch (error: Exception) {
+            Log.e(TAG, "clearing signal callback failed", error)
+        }
+        try {
+            callibri.callibriElectrodeStateChanged = null
+        } catch (error: Exception) {
+            Log.e(TAG, "clearing electrode callback failed", error)
+        }
+        try {
+            callibri.execCommand(SensorCommand.StopSignal)
+            Log.i(TAG, "EEG stop")
+            _state.update { it.copy(streaming = false, message = null, messageIsError = false) }
+        } catch (error: Exception) {
+            Log.e(TAG, "EEG stop failed", error)
+            _state.update {
+                it.copy(
+                    streaming = false,
+                    message = "Couldn't stop EEG: ${error.message ?: "unknown error"}",
+                    messageIsError = true,
+                )
+            }
+        }
+    }
+
+    private fun onSignalPackets(packets: Array<com.neurosdk2.neuro.types.CallibriSignalData>?) {
+        if (!acceptingSamples || packets == null) return
+        try {
+            val merged = ArrayList<Double>(64)
+            var latest = 0.0
+            var lastPack = -1
+            for (packet in packets) {
+                val samples = packet?.samples ?: continue
+                lastPack = packet.packNum
+                for (volts in samples) {
+                    val microvolts = volts * VOLTS_TO_MICROVOLTS
+                    merged.add(microvolts)
+                    latest = microvolts
+                }
+            }
+            if (merged.isEmpty()) return
+            _samplesMicrovolts.tryEmit(MicrovoltChunk(signalSession, merged.toDoubleArray()))
+            samplesSinceLog += merged.size
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastLogAtMs >= 1_000L) {
+                Log.i(
+                    TAG,
+                    "samples received: count=$samplesSinceLog windowMs=${now - lastLogAtMs} " +
+                        "lastPack=$lastPack latestUv=${String.format(Locale.US, "%.2f", latest)}",
+                )
+                samplesSinceLog = 0
+                lastLogAtMs = now
+            }
+        } catch (error: Exception) {
+            Log.e(TAG, "signal callback failed", error)
+        }
+    }
+
+    private fun publishElectrode(electrode: CallibriElectrodeState?) {
+        val mapped = when (electrode) {
+            CallibriElectrodeState.Normal -> ElectrodeContact.Normal
+            CallibriElectrodeState.HighResistance -> ElectrodeContact.HighResistance
+            CallibriElectrodeState.Detached -> ElectrodeContact.Detached
+            else -> return
+        }
+        if (mapped != lastLoggedElectrode) {
+            lastLoggedElectrode = mapped
+            Log.i(TAG, "electrode state: $mapped")
+        }
+        _state.update { it.copy(electrode = mapped) }
+    }
+
+    private fun readElectrode(callibri: Callibri): CallibriElectrodeState? =
+        try {
+            callibri.electrodeState
+        } catch (error: Exception) {
+            Log.w(TAG, "electrode state read failed", error)
+            null
+        }
+
+    private fun readBattery(callibri: Callibri): Int? =
+        try {
+            callibri.battPower
+        } catch (error: Exception) {
+            Log.w(TAG, "battery read failed", error)
+            null
+        }
+
+    private fun releaseSensorLocked(message: String?, isError: Boolean) {
+        val current = sensor ?: run {
+            if (message != null) {
+                _state.update {
+                    it.copy(
+                        phase = SessionPhase.Disconnected,
+                        streaming = false,
+                        message = message,
+                        messageIsError = isError,
+                    )
+                }
+            }
+            return
+        }
+        closingSensor = true
+        sensor = null
+        acceptingSamples = false
+        val wasStreaming = streaming
+        streaming = false
+        lastLoggedElectrode = null
+        val name = try {
+            current.name
+        } catch (_: Exception) {
+            null
+        }
+        try {
+            current.callibriSignalDataReceived = null
+            current.callibriElectrodeStateChanged = null
+            current.sensorStateChanged = null
+            current.batteryChanged = null
+        } catch (error: Exception) {
+            Log.e(TAG, "clearing sensor callbacks failed", error)
+        }
+        if (wasStreaming) {
+            try {
+                current.execCommand(SensorCommand.StopSignal)
+                Log.i(TAG, "EEG stop")
+            } catch (error: Exception) {
+                Log.e(TAG, "EEG stop failed", error)
+            }
+        }
+        try {
+            current.disconnect()
+        } catch (error: Exception) {
+            Log.e(TAG, "disconnect failed", error)
+        }
+        try {
+            current.close()
+        } catch (error: Exception) {
+            Log.e(TAG, "sensor close failed", error)
+        } finally {
+            closingSensor = false
+        }
+        Log.i(TAG, "disconnect: ${name?.takeIf { it.isNotBlank() } ?: "unknown"}")
+        _state.update {
+            it.copy(
+                phase = SessionPhase.Disconnected,
+                deviceName = null,
+                deviceAddress = null,
+                batteryPercent = null,
+                electrode = null,
+                streaming = false,
+                message = message,
+                messageIsError = message != null && isError,
+            )
+        }
+    }
+
+    private fun closeScannerLocked() {
+        val current = scanner ?: return
+        scanner = null
+        scanning = false
+        scanGeneration++
+        try {
+            current.sensorsChanged = null
+        } catch (error: Exception) {
+            Log.e(TAG, "clearing scanner callback failed", error)
+        }
+        try {
+            current.stop()
+        } catch (_: Exception) {
+            // Already stopped, or the native scanner was not started.
+        }
+        try {
+            current.close()
+        } catch (error: Exception) {
+            Log.e(TAG, "scanner close failed", error)
+        }
+    }
+
+    private fun describedRate(callibri: Callibri): Int = callibri.samplingFrequency.toHz()
+
+    private fun CallibriState.withRadio(): CallibriState {
+        val locationRequired = Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+        return copy(
+            bluetoothEnabled = bluetoothAdapter()?.isEnabled == true,
+            locationServicesRequired = locationRequired,
+            locationServicesEnabled = !locationRequired || locationEnabled(),
+        )
+    }
+
+    private fun bluetoothAdapter() =
+        context.getSystemService(BluetoothManager::class.java)?.adapter
+
+    private fun locationEnabled(): Boolean {
+        val manager = context.getSystemService(LocationManager::class.java) ?: return false
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            manager.isLocationEnabled
+        } else {
+            runCatching { manager.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false) ||
+                runCatching { manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false)
+        }
+    }
+
+    private fun SensorSamplingFrequency.toHz(): Int = when (this) {
+        SensorSamplingFrequency.FrequencyHz10 -> 10
+        SensorSamplingFrequency.FrequencyHz20 -> 20
+        SensorSamplingFrequency.FrequencyHz100 -> 100
+        SensorSamplingFrequency.FrequencyHz125 -> 125
+        SensorSamplingFrequency.FrequencyHz250 -> 250
+        SensorSamplingFrequency.FrequencyHz500 -> 500
+        SensorSamplingFrequency.FrequencyHz1000 -> 1_000
+        SensorSamplingFrequency.FrequencyHz2000 -> 2_000
+        SensorSamplingFrequency.FrequencyHz4000 -> 4_000
+        SensorSamplingFrequency.FrequencyHz8000 -> 8_000
+        SensorSamplingFrequency.FrequencyUnsupported -> 0
+    }
+
+    private companion object {
+        const val TAG = "CallibriNFB"
+        const val VOLTS_TO_MICROVOLTS = 1_000_000.0
+    }
+}
