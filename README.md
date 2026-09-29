@@ -1,8 +1,8 @@
 # Callibri NFB
 
-Phase 1 Android app for one [Callibri](https://brainbit.com/) EEG sensor. It scans, connects, streams 250 Hz raw EEG through BrainBit NeuroSDK 2, converts volts to microvolts, and shows three live FRE1 band amplitudes.
+Android app for one [Callibri](https://brainbit.com/) EEG sensor. It scans, connects, streams 250 Hz raw EEG through BrainBit NeuroSDK 2, converts volts to microvolts, and shows three live FRE1 band amplitudes plus a continuous neurofeedback reward.
 
-There is no thresholding, reward, volume control, screen overlay, or background service.
+There is no volume control, screen overlay, or background service. Sessions are not saved.
 
 ## Stack
 
@@ -27,7 +27,7 @@ Debug APK:
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Unit tests for the filters (no device required):
+Unit tests for the filters, rolling thresholds, and reward math (no device required):
 
 ```bash
 ./gradlew :app:testDebugUnitTest
@@ -46,8 +46,18 @@ Unit tests for the filters (no device required):
 7. You should see the device name, **Status: Connected**, a battery percentage, **EEG: Streaming**, and **Sample rate: 250 Hz**.
 8. Electrode contact (from `callibriElectrodeStateChanged`) shows **Contact good**, **High resistance**, **Detached**, or **Waiting for electrode state** until the first reading.
 9. After about a second, Inhibit 1 (4–8 Hz), Reward (12–16 Hz), and Inhibit 2 (19–38 Hz) show amplitude in µV and keep updating several times a second. The latest raw sample and the filtered trace should move when the signal changes.
-10. Edit any band's low/high Hz and tap **Apply bands**. The amplitudes follow the new ranges. Defaults are only a starting point; they are not built into the filter code.
-11. **Stop EEG** / **Start EEG** and **Disconnect** can be used more than once.
+10. The reward card stays on **Calibrating... X / 30 seconds** for the first half minute. Band thresholds appear after a few valid readings, and the reward can leave 20% before the 30 seconds are up. It then reads **Auto threshold: Active**. The bar is empty at 20% and full at 100%. Raw and smoothed percents are both shown; smoothed should lag raw by a fraction of a second.
+11. **Auto threshold: OFF** shows a manual µV field on each band. Change window, target %, weights, minimum reward, or smoothing, then tap **Apply feedback settings**. Out-of-range values are rejected.
+12. Edit any band's low/high Hz and tap **Apply bands**. The amplitudes follow the new ranges, and the reward history starts over. Defaults are only a starting point; they are not built into the filter code.
+13. **Stop EEG** / **Start EEG** and **Disconnect** can be used more than once.
+
+## Reward math
+
+Each band keeps its own 30 second window of valid RMS readings (about 6 per second). The threshold is a percentile of that window, not an average. Inhibit 1 and Inhibit 2 (target 80%) use the percentile where about 80% of recent amplitudes fall below it. Reward (target 70%) uses the percentile where about 70% fall above it.
+
+A band score is 50% when the current amplitude equals the threshold, and it moves gradually as the ratio to the threshold changes. The three scores are weighted 33.3% / 33.4% / 33.3% and mapped so the result stays between 20% and 100%. An exponential smoother with a 500 ms time constant is applied to that final percent.
+
+Until every band has 8 valid readings, the reward is held at 20% and the screen keeps saying it is calibrating. NaN, infinities, amplitudes above 200 µV, and samples while the electrode is detached or high resistance are counted as rejected and do not enter the window.
 
 Logs use the tag `CallibriNFB` (scan, device found, connect, disconnect, EEG start/stop, about one sample summary per second). Filter `adb logcat -s CallibriNFB`.
 

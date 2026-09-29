@@ -29,6 +29,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -44,6 +45,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.callibri.nfb.protocol.BandGoal
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -53,6 +55,7 @@ import com.callibri.nfb.callibri.CallibriPermissions
 import com.callibri.nfb.callibri.ElectrodeContact
 import com.callibri.nfb.callibri.SessionPhase
 import java.util.Locale
+import kotlin.math.roundToInt
 
 @Composable
 fun MainScreen(viewModel: MainViewModel = viewModel()) {
@@ -140,6 +143,14 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         onApply = viewModel::applyBands,
                         onToggleEeg = { if (ui.streaming) viewModel.stopEeg() else viewModel.startEeg() },
                         onDisconnect = viewModel::disconnect,
+                        onAutoChange = viewModel::setAutoThreshold,
+                        onTargetChange = viewModel::updateTarget,
+                        onWeightChange = viewModel::updateWeight,
+                        onManualChange = viewModel::updateManual,
+                        onWindowChange = viewModel::updateWindow,
+                        onSmoothingChange = viewModel::updateSmoothing,
+                        onMinRewardChange = viewModel::updateMinReward,
+                        onApplyFeedback = viewModel::applyFeedbackSettings,
                     )
                 }
             }
@@ -150,10 +161,11 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
 @Composable
 private fun StatusLine(ui: MainUiState) {
     val form = ui.formError
+    val feedback = ui.feedbackError
     val link = ui.linkMessage
-    val text = form ?: link
+    val text = form ?: feedback ?: link
     if (text.isNullOrBlank()) return
-    val isError = form != null || ui.linkMessageIsError
+    val isError = form != null || feedback != null || ui.linkMessageIsError
     Text(
         text = text,
         color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
@@ -235,6 +247,14 @@ private fun ConnectedSection(
     onApply: () -> Unit,
     onToggleEeg: () -> Unit,
     onDisconnect: () -> Unit,
+    onAutoChange: (Boolean) -> Unit,
+    onTargetChange: (String, String) -> Unit,
+    onWeightChange: (String, String) -> Unit,
+    onManualChange: (String, String) -> Unit,
+    onWindowChange: (String) -> Unit,
+    onSmoothingChange: (String) -> Unit,
+    onMinRewardChange: (String) -> Unit,
+    onApplyFeedback: () -> Unit,
 ) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -251,21 +271,42 @@ private fun ConnectedSection(
         }
     }
     Text("FRE1", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+    RewardCard(ui)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(if (ui.autoThreshold) "Auto threshold: ON" else "Auto threshold: OFF")
+        Switch(checked = ui.autoThreshold, onCheckedChange = onAutoChange)
+    }
     Text(
-        "Edit the band edges, then apply them to the live calculator. Defaults are temporary.",
+        "Edit the band edges, then apply them. Thresholds, weights, and smoothing apply separately.",
         style = MaterialTheme.typography.bodySmall,
     )
     ui.bands.forEachIndexed { index, band ->
         BandCard(
             band = band,
+            autoThreshold = ui.autoThreshold,
             onLowChange = { onLowChange(band.id, it) },
             onHighChange = { onHighChange(band.id, it) },
+            onTargetChange = { onTargetChange(band.id, it) },
+            onWeightChange = { onWeightChange(band.id, it) },
+            onManualChange = { onManualChange(band.id, it) },
             onDone = if (index == ui.bands.lastIndex) onApply else null,
         )
     }
     Button(onClick = onApply, modifier = Modifier.fillMaxWidth()) {
         Text("Apply bands")
     }
+    FeedbackSettingsCard(
+        ui = ui,
+        onWindowChange = onWindowChange,
+        onSmoothingChange = onSmoothingChange,
+        onMinRewardChange = onMinRewardChange,
+        onApply = onApplyFeedback,
+    )
+    SessionDiagnostics(ui)
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Raw EEG", fontWeight = FontWeight.Medium)
@@ -288,23 +329,141 @@ private fun ConnectedSection(
 }
 
 @Composable
+private fun RewardCard(ui: MainUiState) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "NEUROFEEDBACK REWARD",
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.8.sp,
+            )
+            Text(ui.rewardStatus, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                formatPercent(ui.rewardSmoothed, decimals = 1),
+                style = MaterialTheme.typography.displaySmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            val fraction = rewardFraction(ui.rewardSmoothed, ui.appliedMinReward)
+            LinearProgressIndicator(
+                progress = { fraction },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(16.dp),
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(formatPercent(ui.appliedMinReward, decimals = 0))
+                Text("100%")
+            }
+            Text("Raw reward: ${formatPercent(ui.rewardRaw, decimals = 1)}")
+            Text("Smoothed reward: ${formatPercent(ui.rewardSmoothed, decimals = 1)}")
+        }
+    }
+}
+
+@Composable
+private fun FeedbackSettingsCard(
+    ui: MainUiState,
+    onWindowChange: (String) -> Unit,
+    onSmoothingChange: (String) -> Unit,
+    onMinRewardChange: (String) -> Unit,
+    onApply: () -> Unit,
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Feedback settings", fontWeight = FontWeight.Medium)
+            Text(
+                "Window 5–120 s. Target success 50–95% on each band. Minimum reward 0–50%. Smoothing 100–2000 ms. Weights are renormalized.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            OutlinedTextField(
+                value = ui.windowText,
+                onValueChange = onWindowChange,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Rolling window seconds") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal, imeAction = ImeAction.Next),
+            )
+            OutlinedTextField(
+                value = ui.minRewardText,
+                onValueChange = onMinRewardChange,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Minimum reward %") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal, imeAction = ImeAction.Next),
+            )
+            OutlinedTextField(
+                value = ui.smoothingText,
+                onValueChange = onSmoothingChange,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Smoothing response ms") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal, imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { onApply() }),
+            )
+            Button(onClick = onApply, modifier = Modifier.fillMaxWidth()) {
+                Text("Apply feedback settings")
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionDiagnostics(ui: MainUiState) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Session diagnostics", fontWeight = FontWeight.Medium)
+            Text("Elapsed EEG time: ${formatElapsed(ui.elapsedMillis)}")
+            Text("Valid observations: ${ui.validObservations}")
+            Text("Rejected observations: ${ui.rejectedObservations}")
+        }
+    }
+}
+
+@Composable
 private fun BandCard(
     band: BandUi,
+    autoThreshold: Boolean,
     onLowChange: (String) -> Unit,
     onHighChange: (String) -> Unit,
+    onTargetChange: (String) -> Unit,
+    onWeightChange: (String) -> Unit,
+    onManualChange: (String) -> Unit,
     onDone: (() -> Unit)?,
 ) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(band.label.uppercase(Locale.US), fontWeight = FontWeight.SemiBold, letterSpacing = 0.6.sp)
             Text(
+                goalLine(band.goal),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
                 "Applied ${formatHz(band.appliedLowHz)}–${formatHz(band.appliedHighHz)} Hz",
                 style = MaterialTheme.typography.bodyMedium,
             )
+            Text("Current: ${band.amplitudeUv?.let(::formatMicrovolts) ?: "—"}")
+            if (band.amplitudeUv != null && !band.latestAccepted) {
+                Text(
+                    "Latest reading was rejected. Scoring holds the previous valid amplitude.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             Text(
-                "Amplitude: ${band.amplitudeUv?.let(::formatMicrovolts) ?: "—"}",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Medium,
+                if (autoThreshold) {
+                    "Auto threshold: ${band.thresholdUv?.let(::formatMicrovolts) ?: "—"}"
+                } else {
+                    "Manual threshold: ${band.thresholdUv?.let(::formatMicrovolts) ?: "—"}"
+                },
+            )
+            Text("Target success: ${percentWhole(band.targetSuccess)}")
+            Text("Current normalized score: ${band.score?.let(::percentWhole) ?: "—"}")
+            Text("Window success: ${band.windowSuccess?.let(::percentWhole) ?: "—"}")
+            Text(
+                "In window: ${band.validInWindow}",
+                style = MaterialTheme.typography.bodySmall,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
@@ -326,10 +485,45 @@ private fun BandCard(
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Decimal,
-                        imeAction = if (onDone != null) ImeAction.Done else ImeAction.Next,
+                        imeAction = ImeAction.Next,
                     ),
-                    keyboardActions = KeyboardActions(
-                        onDone = { onDone?.invoke() },
+                    keyboardActions = KeyboardActions(onDone = { onDone?.invoke() }),
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = band.targetText,
+                    onValueChange = onTargetChange,
+                    modifier = Modifier.weight(1f),
+                    label = { Text("Target %") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Decimal,
+                        imeAction = ImeAction.Next,
+                    ),
+                )
+                OutlinedTextField(
+                    value = band.weightText,
+                    onValueChange = onWeightChange,
+                    modifier = Modifier.weight(1f),
+                    label = { Text("Weight %") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Decimal,
+                        imeAction = ImeAction.Next,
+                    ),
+                )
+            }
+            if (!autoThreshold) {
+                OutlinedTextField(
+                    value = band.manualText,
+                    onValueChange = onManualChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Manual threshold µV") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Decimal,
+                        imeAction = ImeAction.Next,
                     ),
                 )
             }
@@ -394,3 +588,22 @@ private fun SignalTrace(samples: List<Float>) {
 
 private fun formatMicrovolts(value: Double): String =
     String.format(Locale.US, "%.2f µV", value)
+
+private fun formatPercent(value: Double, decimals: Int): String =
+    String.format(Locale.US, "%." + decimals + "f%%", value)
+
+private fun percentWhole(fraction: Double): String =
+    "${(fraction * 100.0).roundToInt()}%"
+
+private fun formatElapsed(millis: Long): String =
+    String.format(Locale.US, "%.1f s", millis.coerceAtLeast(0L) / 1000.0)
+
+private fun rewardFraction(smoothed: Double, minPercent: Double): Float {
+    val span = (100.0 - minPercent).coerceAtLeast(1e-6)
+    return ((smoothed - minPercent) / span).coerceIn(0.0, 1.0).toFloat()
+}
+
+private fun goalLine(goal: BandGoal): String = when (goal) {
+    BandGoal.InhibitBelow -> "Goal: amplitude lower than threshold"
+    BandGoal.RewardAbove -> "Goal: amplitude higher than threshold"
+}
