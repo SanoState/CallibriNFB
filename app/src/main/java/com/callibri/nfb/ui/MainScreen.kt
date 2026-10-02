@@ -29,6 +29,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -154,6 +155,10 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         onSmoothingChange = viewModel::updateSmoothing,
                         onMinRewardChange = viewModel::updateMinReward,
                         onApplyFeedback = viewModel::applyFeedbackSettings,
+                        onStartAudio = viewModel::startTestAudio,
+                        onStopAudio = viewModel::stopTestAudio,
+                        onManualFeedback = viewModel::setManualFeedback,
+                        onManualPercent = viewModel::setManualFeedbackPercent,
                     )
                 }
             }
@@ -259,6 +264,10 @@ private fun ConnectedSection(
     onSmoothingChange: (String) -> Unit,
     onMinRewardChange: (String) -> Unit,
     onApplyFeedback: () -> Unit,
+    onStartAudio: () -> Unit,
+    onStopAudio: () -> Unit,
+    onManualFeedback: (Boolean) -> Unit,
+    onManualPercent: (Double) -> Unit,
 ) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -283,7 +292,7 @@ private fun ConnectedSection(
         }
     }
     Text("FRE1", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-    RewardCard(ui)
+    RewardCard(ui, onStartAudio = onStartAudio, onStopAudio = onStopAudio)
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -318,7 +327,11 @@ private fun ConnectedSection(
         onMinRewardChange = onMinRewardChange,
         onApply = onApplyFeedback,
     )
-    SessionDiagnostics(ui)
+    SessionDiagnostics(
+        ui = ui,
+        onManualFeedback = onManualFeedback,
+        onManualPercent = onManualPercent,
+    )
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Raw EEG", fontWeight = FontWeight.Medium)
@@ -341,7 +354,11 @@ private fun ConnectedSection(
 }
 
 @Composable
-private fun RewardCard(ui: MainUiState) {
+private fun RewardCard(
+    ui: MainUiState,
+    onStartAudio: () -> Unit,
+    onStopAudio: () -> Unit,
+) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
@@ -350,6 +367,15 @@ private fun RewardCard(ui: MainUiState) {
                 letterSpacing = 0.8.sp,
             )
             Text(ui.rewardStatus, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                if (ui.liveFeedbackActive) "Live feedback: active" else "Live feedback: inactive",
+                color = if (ui.liveFeedbackActive) {
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                } else {
+                    MaterialTheme.colorScheme.error
+                },
+                fontWeight = FontWeight.Medium,
+            )
             Text(
                 formatPercent(ui.rewardSmoothed, decimals = 1),
                 style = MaterialTheme.typography.displaySmall,
@@ -369,8 +395,28 @@ private fun RewardCard(ui: MainUiState) {
                 Text(formatPercent(ui.appliedMinReward, decimals = 0))
                 Text("100%")
             }
-            Text("Raw reward: ${formatPercent(ui.rewardRaw, decimals = 1)}")
+            Text("Raw combined reward: ${formatPercent(ui.rewardRaw, decimals = 1)}")
             Text("Smoothed reward: ${formatPercent(ui.rewardSmoothed, decimals = 1)}")
+            Text("Feedback volume: ${formatPercent(ui.feedbackVolumePercent, decimals = 1)}")
+            if (ui.manualFeedback) {
+                Text(
+                    "Manual test is overriding the EEG reward.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Text(
+                "Volume changes only this app's test tone. The phone's media volume stays where you set it.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            ui.audioFailure?.let { failure ->
+                Text(failure, color = MaterialTheme.colorScheme.error)
+            }
+            Button(onClick = onStartAudio, modifier = Modifier.fillMaxWidth(), enabled = !ui.audioPlaying) {
+                Text("Start Test Audio")
+            }
+            OutlinedButton(onClick = onStopAudio, modifier = Modifier.fillMaxWidth(), enabled = ui.audioPlaying) {
+                Text("Stop Test Audio")
+            }
         }
     }
 }
@@ -423,10 +469,47 @@ private fun FeedbackSettingsCard(
 }
 
 @Composable
-private fun SessionDiagnostics(ui: MainUiState) {
+private fun SessionDiagnostics(
+    ui: MainUiState,
+    onManualFeedback: (Boolean) -> Unit,
+    onManualPercent: (Double) -> Unit,
+) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("Session diagnostics", fontWeight = FontWeight.Medium)
+            Text(
+                "Manual feedback test. Diagnostic only. This slider is not the EEG reward.",
+                fontWeight = FontWeight.Medium,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(if (ui.manualFeedback) "Manual feedback test: ON" else "Manual feedback test: OFF")
+                Switch(checked = ui.manualFeedback, onCheckedChange = onManualFeedback)
+            }
+            if (ui.manualFeedback) {
+                Text("Manual level: ${formatPercent(ui.manualFeedbackPercent, decimals = 0)}")
+                Slider(
+                    value = ui.manualFeedbackPercent.toFloat(),
+                    onValueChange = { onManualPercent(it.toDouble()) },
+                    valueRange = 20f..100f,
+                    steps = 79,
+                )
+                Text(
+                    "20% is quiet, 100% is full. The tone's pitch does not change.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Text("Raw combined reward: ${formatPercent(ui.rewardRaw, decimals = 1)}")
+            Text("Smoothed reward: ${formatPercent(ui.rewardSmoothed, decimals = 1)}")
+            Text("Requested feedback volume: ${formatPercent(ui.feedbackVolumePercent, decimals = 1)}")
+            Text("Audio player volume: ${formatGain(ui.playerVolume)}")
+            Text("Manual test: ${if (ui.manualFeedback) "ON" else "OFF"}")
+            Text("Audio playing: ${if (ui.audioPlaying) "YES" else "NO"}")
+            Text("Feedback updates per second: ${ui.feedbackUpdatesPerSecond}")
+            Text("Live feedback: ${if (ui.liveFeedbackActive) "active" else "inactive"}")
             SignalSourceLines(ui)
             Text("Elapsed EEG time: ${formatElapsed(ui.elapsedMillis)}")
             Text("Valid observations: ${ui.validObservations}")
@@ -694,6 +777,9 @@ private fun formatVolts(microvolts: Double): String =
 
 private fun formatSdkVolts(volts: Double): String =
     String.format(Locale.US, "%.8e V", volts)
+
+private fun formatGain(value: Double): String =
+    String.format(Locale.US, "%.2f", value)
 
 private fun formatPercent(value: Double, decimals: Int): String =
     String.format(Locale.US, "%." + decimals + "f%%", value)

@@ -12,6 +12,9 @@ import com.callibri.nfb.callibri.CallibriState
 import com.callibri.nfb.callibri.ElectrodeContact
 import com.callibri.nfb.callibri.SessionPhase
 import com.callibri.nfb.callibri.SignalIngress
+import com.callibri.nfb.feedback.AudioFeedbackOutput
+import com.callibri.nfb.feedback.FeedbackController
+import com.callibri.nfb.feedback.FeedbackSnapshot
 import com.callibri.nfb.feedback.RewardPipeline
 import com.callibri.nfb.feedback.RewardState
 import com.callibri.nfb.protocol.BandGoal
@@ -91,6 +94,14 @@ data class MainUiState(
     val elapsedMillis: Long = 0L,
     val validObservations: Int = 0,
     val rejectedObservations: Int = 0,
+    val feedbackVolumePercent: Double = FRE1Protocol.MIN_REWARD_PERCENT,
+    val playerVolume: Double = 0.0,
+    val audioPlaying: Boolean = false,
+    val manualFeedback: Boolean = false,
+    val manualFeedbackPercent: Double = 50.0,
+    val liveFeedbackActive: Boolean = false,
+    val feedbackUpdatesPerSecond: Int = 0,
+    val audioFailure: String? = null,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -98,7 +109,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         setBands(FRE1Protocol.defaults().asList())
     }
     private val pipeline = RewardPipeline()
+    private val feedback = FeedbackController(AudioFeedbackOutput())
     private val signalMutex = Mutex()
+    private var liveDriveActive = false
     private var processingSession = Long.MIN_VALUE
     private var lastProcessErrorNs = 0L
     private var lastRawUiNs = 0L
@@ -114,7 +127,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         context = application.applicationContext,
         scope = viewModelScope,
         onBeforeSignalStart = {
-            _ui.update { state -> state.clearedSignal(autoOn = state.autoThreshold) }
+            val floor = _ui.value.appliedMinReward
+            val snap = feedback.onSessionReset(floor)
+            _ui.update { state -> state.clearedSignal(autoOn = state.autoThreshold).withFeedback(snap) }
         },
     )
 
@@ -212,6 +227,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stopEeg() {
         manager.stopEeg()
+    }
+
+    fun startTestAudio() {
+        publishFeedback(feedback.startAudio())
+    }
+
+    fun stopTestAudio() {
+        publishFeedback(feedback.stopAudio())
+    }
+
+    fun setManualFeedback(enabled: Boolean) {
+        if (enabled) {
+            feedback.setManualPercent(_ui.value.rewardSmoothed)
+        }
+        publishFeedback(feedback.setManualEnabled(enabled))
+    }
+
+    fun setManualFeedbackPercent(percent: Double) {
+        publishFeedback(feedback.setManualPercent(percent))
     }
 
     fun disconnect() {
@@ -418,6 +452,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        feedback.release()
         manager.release()
         super.onCleared()
     }
@@ -440,6 +475,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 signalMutex.withLock { pipeline.resetSession() }
             }
         }
+        val streaming = connected && link.streaming
+        if (liveDriveActive && !streaming) {
+            val stopAudio = !connected || !_ui.value.manualFeedback
+            publishFeedback(feedback.onLiveInactive(stopAudio = stopAudio))
+        } else if (streaming && !liveDriveActive) {
+            publishFeedback(feedback.markLiveActive())
+        }
+        liveDriveActive = streaming
         linkWasConnected = connected
         _ui.update { current ->
             val connected = link.phase == SessionPhase.Connected
@@ -467,10 +510,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun publishFeedback(snapshot: FeedbackSnapshot) {
+        _ui.update { it.withFeedback(snapshot) }
+    }
+
     private fun publishSignal(snapshot: EegSnapshot, reward: RewardState, latestUv: Double?) {
+        val active = _ui.value.phase == SessionPhase.Connected && _ui.value.streaming
+        val heard = feedback.setLiveReward(reward.smoothedPercent, SystemClock.elapsedRealtime(), active)
         _ui.update { state ->
             if (state.phase != SessionPhase.Connected) return@update state
-            state.withReward(reward).copy(
+            state.withReward(reward).withFeedback(heard).copy(
                 latestRawUv = latestUv ?: snapshot.latestRawMicrovolts,
                 waveform = snapshot.waveform,
             )
@@ -484,11 +533,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun publishReward(reward: RewardState) {
+        val active = _ui.value.phase == SessionPhase.Connected && _ui.value.streaming
+        val heard = feedback.setLiveReward(reward.smoothedPercent, SystemClock.elapsedRealtime(), active)
         _ui.update { state ->
             if (state.phase != SessionPhase.Connected) {
-                state.copy(autoThreshold = reward.autoEnabled, rewardStatus = reward.statusLabel)
+                state.copy(autoThreshold = reward.autoEnabled, rewardStatus = reward.statusLabel).withFeedback(heard)
             } else {
-                state.withReward(reward)
+                state.withReward(reward).withFeedback(heard)
             }
         }
     }
@@ -510,6 +561,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
 private fun electrodeAcceptable(electrode: ElectrodeContact?): Boolean =
     electrode == null || electrode == ElectrodeContact.Normal
+
+private fun MainUiState.withFeedback(snapshot: FeedbackSnapshot): MainUiState = copy(
+    feedbackVolumePercent = snapshot.requestedPercent,
+    playerVolume = snapshot.playerVolume,
+    audioPlaying = snapshot.playing,
+    manualFeedback = snapshot.manualEnabled,
+    manualFeedbackPercent = snapshot.manualPercent,
+    liveFeedbackActive = snapshot.liveActive,
+    feedbackUpdatesPerSecond = snapshot.updatesPerSecond,
+    audioFailure = snapshot.failure,
+)
 
 private fun MainUiState.withReward(reward: RewardState): MainUiState = copy(
     rewardRaw = reward.rawPercent,

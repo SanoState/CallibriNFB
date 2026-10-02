@@ -1,8 +1,6 @@
 # Callibri NFB
 
-Android app for one [Callibri](https://brainbit.com/) EEG sensor. It scans, connects, streams 250 Hz raw EEG through BrainBit NeuroSDK 2, converts volts to microvolts, and shows three live FRE1 band amplitudes plus a continuous neurofeedback reward.
-
-There is no volume control, screen overlay, or background service. Sessions are not saved.
+Android app for one [Callibri](https://brainbit.com/) EEG sensor. It scans, connects, streams 250 Hz raw EEG through BrainBit NeuroSDK 2, converts volts to microvolts, and shows three live FRE1 band amplitudes plus a continuous neurofeedback reward. The smoothed reward sets the volume of a built-in test tone. It does not change the phone's media volume, draw an overlay, or run a background service. Sessions are not saved.
 
 ## Stack
 
@@ -57,7 +55,9 @@ Each band keeps its own 30 second window of valid RMS readings (about 6 per seco
 
 A band score is 50% when the current amplitude equals the threshold, and it moves gradually as the ratio to the threshold changes. The three scores are weighted 33.3% / 33.4% / 33.3% and mapped so the result stays between 20% and 100%. An exponential smoother with a 500 ms time constant is applied to that final percent.
 
-Until every band has 8 valid readings, the reward is held at 20% and the screen keeps saying it is calibrating. NaN, infinities, amplitudes above 200 µV, and samples while the electrode is detached or high resistance are counted as rejected and do not enter the window.
+Until every band has 8 valid readings, the reward is held at 20% and the screen keeps saying it is calibrating.
+
+The smoothed reward is the only input to test-audio loudness: `volume = clamp(smoothedReward, 20, 100) / 100`. A 20% reward is gain 0.20, not silence. The tone is a gapless loop of 196 Hz and 294 Hz played on an `AudioTrack` owned by this app. Start Test Audio and Stop Test Audio do not start or stop EEG. Stopping EEG or disconnecting the sensor stops that tone unless Manual feedback test is on, in which case the diagnostic slider keeps the same gain path. Turning manual mode off returns the tone to the live smoothed reward. Smoothing response ms is still the reward smoother's time constant; volume does not have a second smoother. NaN, infinities, amplitudes above 200 µV, and samples while the electrode is detached or high resistance are counted as rejected and do not enter the window.
 
 Logs use the tag `CallibriNFB` (scan, device found, connect, disconnect, EEG start/stop, about one sample summary per second). Filter `adb logcat -s CallibriNFB`.
 
