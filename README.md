@@ -67,7 +67,7 @@ Before streaming, the app sets the EEG preset, 250 Hz, then the USB connector as
 
 `Callibri` raw samples are volts. The manager multiplies by 1,000,000 and passes microvolts to `EegProcessor`.
 
-The signal-source card shows the read-back `ExtSwInput`, `ADCInput`, electrode state, and the latest raw sample in volts and microvolts. `callibriElectrodeStateChanged` stays connected. NeuroSDK documents that callback as the electrode parameter and does not say it follows the USB switch, so it may still describe the built-in terminals.
+The signal-source card shows the read-back `ExtSwInput`, `ADCInput`, electrode state, and the latest raw sample in volts and microvolts. It also shows the NeuroSDK callback itself: callback count and rate, `getPackNum()`, whether that number is changing, `getSamples()` length, and the first, last, minimum, and maximum volts in the latest packet, plus how many distinct raw values arrived in the last second. The first eight callbacks are written to logcat under `CallibriNFB`, and a one-second summary follows. Every finite sample from `getSamples()` is still copied and multiplied by 1,000,000 before it enters `EegProcessor`. `callibriElectrodeStateChanged` stays connected. NeuroSDK documents that callback as the electrode parameter and does not say it follows the USB switch, so it may still describe the built-in terminals.
 
 Each sample then goes through:
 

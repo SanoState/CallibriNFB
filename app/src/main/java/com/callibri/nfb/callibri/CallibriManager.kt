@@ -86,6 +86,15 @@ class CallibriManager(
     private var samplesSinceLog = 0
     private var lastLogAtMs = 0L
     private var lastLoggedElectrode: ElectrodeContact? = null
+    private var callbackCount = 0L
+    private var callbacksThisSecond = 0
+    private var distinctThisSecond = HashSet<Long>()
+    private var lastSeenPackNum: Int? = null
+    private var packNumChangedThisSecond = false
+    private var callbacksLogged = 0
+    private var droppedChunks = 0L
+    private var lastDiagUiMs = 0L
+    private var ingress = SignalIngress()
 
     fun refreshRadioState() {
         scope.launch(sdkDispatcher) {
@@ -598,7 +607,7 @@ class CallibriManager(
         signalSession += 1
         onBeforeSignalStart()
         acceptingSamples = true
-        samplesSinceLog = 0
+        resetIngressCounters()
         lastLogAtMs = SystemClock.elapsedRealtime()
         try {
             callibri.execCommand(SensorCommand.StartSignal)
@@ -662,37 +671,152 @@ class CallibriManager(
     private fun onSignalPackets(packets: Array<com.neurosdk2.neuro.types.CallibriSignalData>?) {
         if (!acceptingSamples || packets == null) return
         try {
-            val merged = ArrayList<Double>(64)
-            var latest = 0.0
-            var lastPack = -1
-            for (packet in packets) {
-                val samples = packet?.samples ?: continue
-                lastPack = packet.packNum
-                for (volts in samples) {
-                    val microvolts = volts * VOLTS_TO_MICROVOLTS
-                    merged.add(microvolts)
-                    latest = microvolts
-                }
-            }
-            if (merged.isEmpty()) return
-            _samplesMicrovolts.tryEmit(MicrovoltChunk(signalSession, merged.toDoubleArray()))
-            samplesSinceLog += merged.size
-            val now = SystemClock.elapsedRealtime()
-            if (now - lastLogAtMs >= 1_000L) {
-                val latestVolts = latest / VOLTS_TO_MICROVOLTS
+            callbackCount++
+            callbacksThisSecond++
+            val logThisCallback = callbacksLogged < LOGGED_CALLBACKS
+            if (logThisCallback) {
                 Log.i(
                     TAG,
-                    "samples received: count=$samplesSinceLog windowMs=${now - lastLogAtMs} " +
-                        "lastPack=$lastPack latestVolts=${String.format(Locale.US, "%.4e", latestVolts)} " +
-                        "latestUv=${String.format(Locale.US, "%.2f", latest)}",
+                    "signal callback #$callbackCount packets=${packets.size} " +
+                        "read with getPackNum() and getSamples()",
                 )
+            }
+            val merged = ArrayList<Double>(64)
+            var callbackSamples = 0
+            var latestPacketSamples = 0
+            var firstVolts = Double.NaN
+            var lastVolts = Double.NaN
+            var minVolts = Double.POSITIVE_INFINITY
+            var maxVolts = Double.NEGATIVE_INFINITY
+            var latestPack = lastSeenPackNum
+            var previousPack = lastSeenPackNum
+            for ((index, packet) in packets.withIndex()) {
+                val packNum = packet.getPackNum()
+                val samples = packet.getSamples()?.copyOf() ?: DoubleArray(0)
+                val previous = lastSeenPackNum
+                if (previous != null && packNum != previous) packNumChangedThisSecond = true
+                previousPack = previous
+                lastSeenPackNum = packNum
+                latestPack = packNum
+                if (logThisCallback) logPacket(index, packNum, samples)
+                if (samples.isEmpty()) continue
+                latestPacketSamples = samples.size
+                firstVolts = samples[0]
+                lastVolts = samples[samples.size - 1]
+                minVolts = Double.POSITIVE_INFINITY
+                maxVolts = Double.NEGATIVE_INFINITY
+                for (volts in samples) {
+                    if (volts < minVolts) minVolts = volts
+                    if (volts > maxVolts) maxVolts = volts
+                    distinctThisSecond.add(volts.toRawBits())
+                    merged.add(volts * VOLTS_TO_MICROVOLTS)
+                }
+                callbackSamples += samples.size
+            }
+            if (logThisCallback) callbacksLogged++
+            val hasPacket = latestPacketSamples > 0 && firstVolts.isFinite()
+            ingress = ingress.copy(
+                callbackCount = callbackCount,
+                latestPackNum = latestPack,
+                previousPackNum = previousPack,
+                packNumChanging = packNumChangedThisSecond,
+                latestCallbackSamples = callbackSamples,
+                latestPacketSamples = latestPacketSamples,
+                firstVolts = if (hasPacket) firstVolts else ingress.firstVolts,
+                lastVolts = if (hasPacket) lastVolts else ingress.lastVolts,
+                minVolts = if (hasPacket) minVolts else ingress.minVolts,
+                maxVolts = if (hasPacket) maxVolts else ingress.maxVolts,
+                droppedChunks = droppedChunks,
+            )
+            if (merged.isNotEmpty()) {
+                val emitted = _samplesMicrovolts.tryEmit(
+                    MicrovoltChunk(signalSession, merged.toDoubleArray()),
+                )
+                if (!emitted) {
+                    droppedChunks++
+                    ingress = ingress.copy(droppedChunks = droppedChunks)
+                    Log.e(TAG, "signal chunk dropped before the EEG pipeline; droppedChunks=$droppedChunks")
+                }
+            }
+            samplesSinceLog += callbackSamples
+            val now = SystemClock.elapsedRealtime()
+            val secondElapsed = now - lastLogAtMs >= 1_000L
+            if (secondElapsed) {
+                ingress = ingress.copy(
+                    callbacksPerSecond = callbacksThisSecond,
+                    packNumChanging = packNumChangedThisSecond,
+                    distinctValuesLastSecond = distinctThisSecond.size,
+                    samplesPerSecond = samplesSinceLog,
+                    droppedChunks = droppedChunks,
+                )
+                Log.i(
+                    TAG,
+                    "signal ingress callbacks=$callbackCount callbacksPerSec=$callbacksThisSecond " +
+                        "packNum=${ingress.latestPackNum} previous=${ingress.previousPackNum} " +
+                        "packNumChanging=$packNumChangedThisSecond " +
+                        "callbackSamples=$callbackSamples packetSamples=$latestPacketSamples " +
+                        "first=${formatVolts(ingress.firstVolts)} last=${formatVolts(ingress.lastVolts)} " +
+                        "min=${formatVolts(ingress.minVolts)} max=${formatVolts(ingress.maxVolts)} " +
+                        "distinct=${distinctThisSecond.size} samplesPerSec=$samplesSinceLog " +
+                        "droppedChunks=$droppedChunks windowMs=${now - lastLogAtMs}",
+                )
+                callbacksThisSecond = 0
                 samplesSinceLog = 0
+                distinctThisSecond.clear()
+                packNumChangedThisSecond = false
                 lastLogAtMs = now
+            }
+            if (secondElapsed || logThisCallback || now - lastDiagUiMs >= 200L) {
+                lastDiagUiMs = now
+                val published = ingress
+                _state.update { it.copy(signalIngress = published) }
             }
         } catch (error: Exception) {
             Log.e(TAG, "signal callback failed", error)
         }
     }
+
+    private fun logPacket(index: Int, packNum: Int, samples: DoubleArray) {
+        var min = Double.POSITIVE_INFINITY
+        var max = Double.NEGATIVE_INFINITY
+        for (volts in samples) {
+            if (volts < min) min = volts
+            if (volts > max) max = volts
+        }
+        val preview = if (samples.isEmpty()) {
+            "[]"
+        } else {
+            samples.joinToString(limit = 32, prefix = "[", postfix = "]") { volts ->
+                String.format(Locale.US, "%.8e", volts)
+            }
+        }
+        val first = samples.firstOrNull()
+        val last = samples.lastOrNull()
+        Log.i(
+            TAG,
+            "  packet[$index] packNum=$packNum n=${samples.size} " +
+                "first=${formatVolts(first)} last=${formatVolts(last)} " +
+                "min=${if (samples.isEmpty()) "none" else formatVolts(min)} " +
+                "max=${if (samples.isEmpty()) "none" else formatVolts(max)} values=$preview",
+        )
+    }
+
+    private fun resetIngressCounters() {
+        callbackCount = 0
+        callbacksThisSecond = 0
+        samplesSinceLog = 0
+        distinctThisSecond.clear()
+        lastSeenPackNum = null
+        packNumChangedThisSecond = false
+        callbacksLogged = 0
+        droppedChunks = 0
+        lastDiagUiMs = 0
+        ingress = SignalIngress()
+        _state.update { it.copy(signalIngress = ingress) }
+    }
+
+    private fun formatVolts(volts: Double?): String =
+        if (volts == null || !volts.isFinite()) "none" else String.format(Locale.US, "%.8e", volts)
 
     private fun publishElectrode(electrode: CallibriElectrodeState?) {
         val mapped = when (electrode) {
@@ -778,6 +902,7 @@ class CallibriManager(
             closingSensor = false
         }
         Log.i(TAG, "disconnect: ${name?.takeIf { it.isNotBlank() } ?: "unknown"}")
+        resetIngressCounters()
         _state.update {
             it.copy(
                 phase = SessionPhase.Disconnected,
@@ -787,6 +912,7 @@ class CallibriManager(
                 electrode = null,
                 extSwInput = null,
                 adcInput = null,
+                signalIngress = SignalIngress(),
                 streaming = false,
                 message = message,
                 messageIsError = message != null && isError,
@@ -857,5 +983,6 @@ class CallibriManager(
     private companion object {
         const val TAG = "CallibriNFB"
         const val VOLTS_TO_MICROVOLTS = 1_000_000.0
+        const val LOGGED_CALLBACKS = 8
     }
 }

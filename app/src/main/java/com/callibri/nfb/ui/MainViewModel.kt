@@ -11,6 +11,7 @@ import com.callibri.nfb.callibri.CallibriPermissions
 import com.callibri.nfb.callibri.CallibriState
 import com.callibri.nfb.callibri.ElectrodeContact
 import com.callibri.nfb.callibri.SessionPhase
+import com.callibri.nfb.callibri.SignalIngress
 import com.callibri.nfb.feedback.RewardPipeline
 import com.callibri.nfb.feedback.RewardState
 import com.callibri.nfb.protocol.BandGoal
@@ -65,6 +66,7 @@ data class MainUiState(
     val electrode: ElectrodeContact? = null,
     val extSwInput: String? = null,
     val adcInput: String? = null,
+    val signalIngress: SignalIngress = SignalIngress(),
     val streaming: Boolean = false,
     val sampleRateHz: Int = FRE1Protocol.SAMPLE_RATE_HZ,
     val linkMessage: String? = null,
@@ -446,6 +448,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 electrode = link.electrode,
                 extSwInput = link.extSwInput,
                 adcInput = link.adcInput,
+                signalIngress = link.signalIngress,
                 streaming = link.streaming,
                 sampleRateHz = link.sampleRateHz,
                 linkMessage = link.message,

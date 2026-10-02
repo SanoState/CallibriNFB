@@ -54,6 +54,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.callibri.nfb.callibri.CallibriPermissions
 import com.callibri.nfb.callibri.ElectrodeContact
 import com.callibri.nfb.callibri.SessionPhase
+import com.callibri.nfb.callibri.SignalIngress
+import com.callibri.nfb.protocol.FRE1Protocol
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -274,6 +276,7 @@ private fun ConnectedSection(
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("Signal source", fontWeight = FontWeight.Medium)
             SignalSourceLines(ui)
+            PacketDiagnostics(ui.signalIngress)
         }
     }
     Text("FRE1", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -602,6 +605,31 @@ private fun SignalSourceLines(ui: MainUiState) {
     Text("Converted: ${ui.latestRawUv?.let(::formatMicrovolts) ?: "—"}")
 }
 
+@Composable
+private fun PacketDiagnostics(ingress: SignalIngress) {
+    Text("Signal callbacks: ${ingress.callbackCount}")
+    Text("Callbacks per second: ${ingress.callbacksPerSecond} (last second)")
+    Text("Latest PackNum: ${ingress.latestPackNum?.toString() ?: "—"}")
+    Text(
+        "PackNum changing: ${if (ingress.callbackCount == 0L) "—" else if (ingress.packNumChanging) "yes" else "no"}" +
+            (ingress.previousPackNum?.let { " (previous $it)" } ?: ""),
+    )
+    Text("Samples in latest callback: ${ingress.latestCallbackSamples}")
+    Text("Samples in latest packet: ${ingress.latestPacketSamples}")
+    Text("First sample: ${ingress.firstVolts?.let(::formatSdkVolts) ?: "—"}")
+    Text("Last sample: ${ingress.lastVolts?.let(::formatSdkVolts) ?: "—"}")
+    Text("Minimum sample: ${ingress.minVolts?.let(::formatSdkVolts) ?: "—"}")
+    Text("Maximum sample: ${ingress.maxVolts?.let(::formatSdkVolts) ?: "—"}")
+    Text("Distinct raw values last second: ${ingress.distinctValuesLastSecond}")
+    Text("Samples per second: ${ingress.samplesPerSecond} (last second, expected ${FRE1Protocol.SAMPLE_RATE_HZ})")
+    if (ingress.droppedChunks > 0) {
+        Text(
+            "Chunks dropped before the EEG pipeline: ${ingress.droppedChunks}",
+            color = MaterialTheme.colorScheme.error,
+        )
+    }
+}
+
 private fun electrodeDiagnostic(electrode: ElectrodeContact?): String = when (electrode) {
     ElectrodeContact.Normal -> "Normal (contact good)"
     ElectrodeContact.HighResistance -> "HighResistance"
@@ -614,6 +642,9 @@ private fun formatMicrovolts(value: Double): String =
 
 private fun formatVolts(microvolts: Double): String =
     String.format(Locale.US, "%.4e V", microvolts / 1_000_000.0)
+
+private fun formatSdkVolts(volts: Double): String =
+    String.format(Locale.US, "%.8e V", volts)
 
 private fun formatPercent(value: Double, decimals: Int): String =
     String.format(Locale.US, "%." + decimals + "f%%", value)
