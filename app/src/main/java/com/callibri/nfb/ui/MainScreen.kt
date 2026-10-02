@@ -636,6 +636,7 @@ private fun SignalSourceLines(ui: MainUiState) {
     Text("ADCInput: ${ui.adcInput ?: "—"}")
     Text("Gain: ${ui.gain ?: "—"}")
     Text("Offset: ${ui.dataOffset ?: "—"}")
+    Text("Hardware HPF: ${ui.hardwareFilter ?: "—"}")
     Text("Electrode: ${electrodeDiagnostic(ui.electrode)}")
     Text("Incoming raw: ${ui.latestRawUv?.let(::formatVolts) ?: "—"}")
     Text("Converted: ${ui.latestRawUv?.let(::formatMicrovolts) ?: "—"}")

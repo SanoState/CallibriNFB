@@ -18,6 +18,7 @@ import com.neurosdk2.neuro.types.SensorADCInput
 import com.neurosdk2.neuro.types.SensorCommand
 import com.neurosdk2.neuro.types.SensorDataOffset
 import com.neurosdk2.neuro.types.SensorExternalSwitchInput
+import com.neurosdk2.neuro.types.SensorFilter
 import com.neurosdk2.neuro.types.SensorFamily
 import com.neurosdk2.neuro.types.SensorGain
 import com.neurosdk2.neuro.types.SensorInfo
@@ -152,6 +153,7 @@ class CallibriManager(
             try {
                 writeAdc(callibri, wanted)
                 restoreUsbGainOffset(callibri)
+                writeSkinHighPass(callibri)
                 Log.i(TAG, "ADC input switched to ${wanted.name}; ${describeFrontEnd(readFrontEnd(callibri))}")
             } catch (error: Exception) {
                 Log.e(TAG, "ADC input switch to ${wanted.name} failed", error)
@@ -520,6 +522,7 @@ class CallibriManager(
         writeAdc(callibri, adc)
         val gainRead = writeGain(callibri, gain)
         val offsetRead = writeOffset(callibri, offset)
+        val filterRead = writeSkinHighPass(callibri)
         val extSwAfter = readExtSw(callibri)
         val adcAfter = readAdc(callibri)
         if (extSwAfter != extSw || adcAfter != adc) {
@@ -532,6 +535,7 @@ class CallibriManager(
                     adcInput = adcAfter?.name ?: "read failed",
                     gain = gainRead.name,
                     dataOffset = offsetRead.name,
+                    hardwareFilter = filterRead,
                 )
             }
             throw IllegalStateException(detail)
@@ -541,7 +545,8 @@ class CallibriManager(
             "EEG input confirmed ExtSwInput=${extSwAfter.name} index=${extSwAfter.index()} " +
                 "ADCInput=${adcAfter.name} index=${adcAfter.index()} " +
                 "Gain=${gainRead.name} index=${gainRead.index()} " +
-                "DataOffset=${offsetRead.name} index=${offsetRead.index()}",
+                "DataOffset=${offsetRead.name} index=${offsetRead.index()} " +
+                "HardwareHPF=$filterRead",
         )
         _state.update {
             it.copy(
@@ -549,6 +554,7 @@ class CallibriManager(
                 adcInput = adcAfter.name,
                 gain = gainRead.name,
                 dataOffset = offsetRead.name,
+                hardwareFilter = filterRead,
             )
         }
     }
@@ -693,6 +699,47 @@ class CallibriManager(
             null
         }
 
+    /**
+     * Skin contact adds a DC offset that climbs to int16 +32767 in about a second.
+     * The app's 1 Hz high-pass runs after that clip, so it cannot recover the trace.
+     * This is the sensor's own 1 Hz high-pass, applied before the samples are packed.
+     * setSignalType clears hardware filters, so this has to be written after the preset.
+     */
+    private fun writeSkinHighPass(callibri: Callibri): String {
+        val wanted = SensorFilter.FilterHPFBwhLvl1CutoffFreq1Hz
+        val supported = try {
+            callibri.isSupportedParameter(SensorParameter.ParameterHardwareFilterState) &&
+                callibri.isSupportedFilter(wanted)
+        } catch (error: Exception) {
+            Log.e(TAG, "hardware filter support check failed", error)
+            false
+        }
+        if (!supported) {
+            Log.e(TAG, "Hardware HPF SensorFilter.${wanted.name} is not supported")
+            _state.update { it.copy(hardwareFilter = "unsupported") }
+            return "unsupported"
+        }
+        try {
+            callibri.setHardwareFilters(listOf(wanted))
+        } catch (error: Exception) {
+            Log.e(TAG, "hardware HPF setter failed for SensorFilter.${wanted.name}", error)
+            _state.update { it.copy(hardwareFilter = "set failed") }
+            return "set failed"
+        }
+        val read = try {
+            callibri.getHardwareFilters().orEmpty()
+        } catch (error: Exception) {
+            Log.e(TAG, "hardware filter read failed", error)
+            _state.update { it.copy(hardwareFilter = "read failed") }
+            return "read failed"
+        }
+        val names = read.joinToString(separator = ", ") { it.name }.ifBlank { "none" }
+        val label = if (read.any { it == wanted }) "1 Hz" else names
+        Log.i(TAG, "Hardware HPF set SensorFilter.${wanted.name} readBack=$names label=$label")
+        _state.update { it.copy(hardwareFilter = label) }
+        return label
+    }
+
     private fun restoreUsbGainOffset(callibri: Callibri) {
         if (readExtSw(callibri) != SensorExternalSwitchInput.ExtSwInUSB) {
             writeExtSw(callibri, SensorExternalSwitchInput.ExtSwInUSB)
@@ -740,12 +787,14 @@ class CallibriManager(
             front = readFrontEnd(callibri)
             Log.i(TAG, "after StartSignal rewrite ${describeFrontEnd(front)}")
         }
+        val filterRead = writeSkinHighPass(callibri)
         _state.update {
             it.copy(
                 extSwInput = front.extSw?.name ?: "read failed",
                 adcInput = front.adc?.name ?: "read failed",
                 gain = front.gain?.name ?: "read failed",
                 dataOffset = front.offset?.name ?: "read failed",
+                hardwareFilter = filterRead,
             )
         }
     }
@@ -1123,6 +1172,7 @@ class CallibriManager(
                 adcInput = null,
                 gain = null,
                 dataOffset = null,
+                hardwareFilter = null,
                 signalIngress = SignalIngress(),
                 streaming = false,
                 message = message,
@@ -1202,7 +1252,7 @@ class CallibriManager(
         val mid = (minVolts + maxVolts) / 2.0
         return when {
             kotlin.math.abs(mid - POSITIVE_FULL_SCALE_VOLTS) < 2e-6 ->
-                "ADC pinned at +full scale. That is int16 32767, not EEG. Try Electrodes, Short, or Test below."
+                "ADC pinned at +full scale (int16 32767). Skin contact DC does this. Hardware HPF should read 1 Hz."
             kotlin.math.abs(mid - NEGATIVE_FULL_SCALE_VOLTS) < 2e-6 ->
                 "ADC pinned at −full scale."
             else -> "Raw samples are constant."

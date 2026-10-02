@@ -69,6 +69,8 @@ data class CallibriState(
     val gain: String? = null,
     /** Read-back of SensorDataOffset, or a failure label if the setter did not stick. */
     val dataOffset: String? = null,
+    /** Read-back of the sensor high-pass, or a failure label. */
+    val hardwareFilter: String? = null,
     val signalIngress: SignalIngress = SignalIngress(),
     val streaming: Boolean = false,
     val sampleRateHz: Int = FRE1Protocol.SAMPLE_RATE_HZ,
