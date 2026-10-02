@@ -63,6 +63,8 @@ data class MainUiState(
     val deviceName: String? = null,
     val batteryPercent: Int? = null,
     val electrode: ElectrodeContact? = null,
+    val extSwInput: String? = null,
+    val adcInput: String? = null,
     val streaming: Boolean = false,
     val sampleRateHz: Int = FRE1Protocol.SAMPLE_RATE_HZ,
     val linkMessage: String? = null,
@@ -94,6 +96,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val signalMutex = Mutex()
     private var processingSession = Long.MIN_VALUE
     private var lastProcessErrorNs = 0L
+    private var lastRawUiNs = 0L
 
     @Volatile
     private var latestElectrode: ElectrodeContact? = null
@@ -125,6 +128,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         pipeline.resetSession()
                     }
                     pipeline.noteTime(SystemClock.elapsedRealtime())
+                    val latestUv = if (chunk.samples.isEmpty()) null else chunk.samples[chunk.samples.size - 1]
                     var snapshot: EegSnapshot? = null
                     var reward: RewardState? = null
                     val contactAcceptable = electrodeAcceptable(latestElectrode)
@@ -147,8 +151,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     val published = snapshot
                     val publishedReward = reward
+                    val nowNs = System.nanoTime()
+                    val rawDue = nowNs - lastRawUiNs >= 100_000_000L
                     if (published != null && publishedReward != null) {
-                        publishSignal(published, publishedReward)
+                        lastRawUiNs = nowNs
+                        publishSignal(published, publishedReward, latestUv)
+                    } else if (latestUv != null && rawDue) {
+                        lastRawUiNs = nowNs
+                        publishIncoming(latestUv)
                     }
                 }
             }
@@ -434,6 +444,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 deviceName = link.deviceName,
                 batteryPercent = link.batteryPercent,
                 electrode = link.electrode,
+                extSwInput = link.extSwInput,
+                adcInput = link.adcInput,
                 streaming = link.streaming,
                 sampleRateHz = link.sampleRateHz,
                 linkMessage = link.message,
@@ -442,13 +454,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun publishSignal(snapshot: EegSnapshot, reward: RewardState) {
+    private fun publishSignal(snapshot: EegSnapshot, reward: RewardState, latestUv: Double?) {
         _ui.update { state ->
             if (state.phase != SessionPhase.Connected) return@update state
             state.withReward(reward).copy(
-                latestRawUv = snapshot.latestRawMicrovolts,
+                latestRawUv = latestUv ?: snapshot.latestRawMicrovolts,
                 waveform = snapshot.waveform,
             )
+        }
+    }
+
+    private fun publishIncoming(latestUv: Double) {
+        _ui.update { state ->
+            if (state.phase != SessionPhase.Connected) state else state.copy(latestRawUv = latestUv)
         }
     }
 

@@ -270,6 +270,12 @@ private fun ConnectedSection(
             Text("Sample rate: ${ui.sampleRateHz} Hz")
         }
     }
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Signal source", fontWeight = FontWeight.Medium)
+            SignalSourceLines(ui)
+        }
+    }
     Text("FRE1", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
     RewardCard(ui)
     Row(
@@ -311,7 +317,7 @@ private fun ConnectedSection(
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Raw EEG", fontWeight = FontWeight.Medium)
             Text(
-                ui.latestRawUv?.let { "Latest sample: ${formatMicrovolts(it)}" } ?: "Latest sample: —",
+                ui.latestRawUv?.let { "Latest sample: ${formatVolts(it)} (${formatMicrovolts(it)})" } ?: "Latest sample: —",
             )
             Text(
                 "Filtered trace (about 1–45 Hz, 60 Hz notch). It should move when the signal changes.",
@@ -415,6 +421,7 @@ private fun SessionDiagnostics(ui: MainUiState) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("Session diagnostics", fontWeight = FontWeight.Medium)
+            SignalSourceLines(ui)
             Text("Elapsed EEG time: ${formatElapsed(ui.elapsedMillis)}")
             Text("Valid observations: ${ui.validObservations}")
             Text("Rejected observations: ${ui.rejectedObservations}")
@@ -586,8 +593,27 @@ private fun SignalTrace(samples: List<Float>) {
     }
 }
 
+@Composable
+private fun SignalSourceLines(ui: MainUiState) {
+    Text("ExtSwInput: ${ui.extSwInput ?: "—"}")
+    Text("ADCInput: ${ui.adcInput ?: "—"}")
+    Text("Electrode: ${electrodeDiagnostic(ui.electrode)}")
+    Text("Incoming raw: ${ui.latestRawUv?.let(::formatVolts) ?: "—"}")
+    Text("Converted: ${ui.latestRawUv?.let(::formatMicrovolts) ?: "—"}")
+}
+
+private fun electrodeDiagnostic(electrode: ElectrodeContact?): String = when (electrode) {
+    ElectrodeContact.Normal -> "Normal (contact good)"
+    ElectrodeContact.HighResistance -> "HighResistance"
+    ElectrodeContact.Detached -> "Detached"
+    null -> "—"
+}
+
 private fun formatMicrovolts(value: Double): String =
     String.format(Locale.US, "%.2f µV", value)
+
+private fun formatVolts(microvolts: Double): String =
+    String.format(Locale.US, "%.4e V", microvolts / 1_000_000.0)
 
 private fun formatPercent(value: Double, decimals: Int): String =
     String.format(Locale.US, "%." + decimals + "f%%", value)

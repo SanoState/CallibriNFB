@@ -14,7 +14,9 @@ import com.neurosdk2.neuro.interfaces.CallibriElectrodeStateChanged
 import com.neurosdk2.neuro.interfaces.CallibriSignalDataReceived
 import com.neurosdk2.neuro.types.CallibriElectrodeState
 import com.neurosdk2.neuro.types.CallibriSignalType
+import com.neurosdk2.neuro.types.SensorADCInput
 import com.neurosdk2.neuro.types.SensorCommand
+import com.neurosdk2.neuro.types.SensorExternalSwitchInput
 import com.neurosdk2.neuro.types.SensorFamily
 import com.neurosdk2.neuro.types.SensorInfo
 import com.neurosdk2.neuro.types.SensorParameter
@@ -435,9 +437,20 @@ class CallibriManager(
     }
 
     private fun configureEeg(callibri: Callibri) {
-        callibri.signalType = CallibriSignalType.EEG
+        val signalType = CallibriSignalType.EEG
+        val sampling = SensorSamplingFrequency.FrequencyHz250
+        val extSw = SensorExternalSwitchInput.ExtSwInUSB
+        val adc = SensorADCInput.ADCInputResistance
+        Log.i(
+            TAG,
+            "EEG configure enums: CallibriSignalType.${signalType.name} " +
+                "SensorSamplingFrequency.${sampling.name} " +
+                "SensorExternalSwitchInput.${extSw.name} " +
+                "SensorADCInput.${adc.name}",
+        )
+        callibri.signalType = signalType
         if (callibri.isSupportedParameter(SensorParameter.ParameterSamplingFrequency)) {
-            callibri.setSamplingFrequency(SensorSamplingFrequency.FrequencyHz250)
+            callibri.setSamplingFrequency(sampling)
         } else {
             Log.w(TAG, "sampling frequency parameter is not supported; reading the current rate")
         }
@@ -450,7 +463,102 @@ class CallibriManager(
         if (rate != FRE1Protocol.SAMPLE_RATE_HZ) {
             throw IllegalStateException("Callibri sampling rate is $rate Hz; expected ${FRE1Protocol.SAMPLE_RATE_HZ} Hz")
         }
+        // Signal-type preset is applied first. ExtSw and ADC are set after it so the
+        // preset cannot leave the built-in terminals selected.
+        val extSwRead = writeExtSw(callibri, extSw)
+        val adcRead = writeAdc(callibri, adc)
+        val extSwAfterAdc = readExtSw(callibri)
+        if (extSwAfterAdc != extSw) {
+            val detail = "ExtSwInput read back ${extSwAfterAdc?.name ?: "null"} after ADC was set; wanted ${extSw.name}."
+            Log.e(TAG, detail)
+            _state.update { it.copy(extSwInput = extSwAfterAdc?.name ?: "read failed", adcInput = adcRead.name) }
+            throw IllegalStateException(detail)
+        }
+        Log.i(
+            TAG,
+            "EEG input confirmed ExtSwInput=${extSwRead.name} index=${extSwRead.index()} " +
+                "ADCInput=${adcRead.name} index=${adcRead.index()}",
+        )
+        _state.update { it.copy(extSwInput = extSwRead.name, adcInput = adcRead.name) }
     }
+
+    private fun writeExtSw(callibri: Callibri, wanted: SensorExternalSwitchInput): SensorExternalSwitchInput {
+        if (!supports(callibri, SensorParameter.ParameterExternalSwitchState)) {
+            val detail = "ExtSwInput is not supported. Wanted SensorExternalSwitchInput.${wanted.name}."
+            Log.e(TAG, detail)
+            _state.update { it.copy(extSwInput = "unsupported") }
+            throw IllegalStateException(detail)
+        }
+        try {
+            callibri.extSwInput = wanted
+        } catch (error: Exception) {
+            val detail = "ExtSwInput setter failed for SensorExternalSwitchInput.${wanted.name}: ${error.message ?: error.javaClass.simpleName}"
+            Log.e(TAG, detail, error)
+            _state.update { it.copy(extSwInput = "set failed") }
+            throw IllegalStateException(detail, error)
+        }
+        val read = readExtSw(callibri)
+        Log.i(TAG, "ExtSwInput set SensorExternalSwitchInput.${wanted.name} readBack=${read?.name ?: "null"} index=${read?.index()}")
+        if (read != wanted) {
+            val detail = "ExtSwInput read back ${read?.name ?: "null"}; wanted ${wanted.name}. USB mode was not set."
+            Log.e(TAG, detail)
+            _state.update { it.copy(extSwInput = read?.name ?: "read failed") }
+            throw IllegalStateException(detail)
+        }
+        _state.update { it.copy(extSwInput = read.name) }
+        return read
+    }
+
+    private fun writeAdc(callibri: Callibri, wanted: SensorADCInput): SensorADCInput {
+        if (!supports(callibri, SensorParameter.ParameterADCInputState)) {
+            val detail = "ADCInput is not supported. Wanted SensorADCInput.${wanted.name}."
+            Log.e(TAG, detail)
+            _state.update { it.copy(adcInput = "unsupported") }
+            throw IllegalStateException(detail)
+        }
+        try {
+            callibri.setADCInput(wanted)
+        } catch (error: Exception) {
+            val detail = "ADCInput setter failed for SensorADCInput.${wanted.name}: ${error.message ?: error.javaClass.simpleName}"
+            Log.e(TAG, detail, error)
+            _state.update { it.copy(adcInput = "set failed") }
+            throw IllegalStateException(detail)
+        }
+        val read = readAdc(callibri)
+        Log.i(TAG, "ADCInput set SensorADCInput.${wanted.name} readBack=${read?.name ?: "null"} index=${read?.index()}")
+        if (read != wanted) {
+            val detail = "ADCInput read back ${read?.name ?: "null"}; wanted ${wanted.name}."
+            Log.e(TAG, detail)
+            _state.update { it.copy(adcInput = read?.name ?: "read failed") }
+            throw IllegalStateException(detail)
+        }
+        _state.update { it.copy(adcInput = read.name) }
+        return read
+    }
+
+    private fun readExtSw(callibri: Callibri): SensorExternalSwitchInput? =
+        try {
+            callibri.extSwInput
+        } catch (error: Exception) {
+            Log.e(TAG, "ExtSwInput read failed", error)
+            null
+        }
+
+    private fun readAdc(callibri: Callibri): SensorADCInput? =
+        try {
+            callibri.getADCInput()
+        } catch (error: Exception) {
+            Log.e(TAG, "ADCInput read failed", error)
+            null
+        }
+
+    private fun supports(callibri: Callibri, parameter: SensorParameter): Boolean =
+        try {
+            callibri.isSupportedParameter(parameter)
+        } catch (error: Exception) {
+            Log.e(TAG, "isSupportedParameter ${parameter.name} failed", error)
+            false
+        }
 
     private fun startSignalLocked() {
         val callibri = sensor ?: run {
@@ -479,6 +587,7 @@ class CallibriManager(
             }
             return
         }
+        configureEeg(callibri)
 
         callibri.callibriElectrodeStateChanged = CallibriElectrodeStateChanged { electrode ->
             publishElectrode(electrode)
@@ -500,7 +609,11 @@ class CallibriManager(
             throw error
         }
         streaming = true
-        Log.i(TAG, "EEG start")
+        Log.i(
+            TAG,
+            "EEG start ExtSwInput=${_state.value.extSwInput} ADCInput=${_state.value.adcInput}. " +
+                "callibriElectrodeStateChanged stays subscribed. NeuroSDK documents that callback as the electrode parameter and does not say it follows ExtSwInUSB.",
+        )
         publishElectrode(readElectrode(callibri))
         _state.update {
             it.copy(
@@ -566,10 +679,12 @@ class CallibriManager(
             samplesSinceLog += merged.size
             val now = SystemClock.elapsedRealtime()
             if (now - lastLogAtMs >= 1_000L) {
+                val latestVolts = latest / VOLTS_TO_MICROVOLTS
                 Log.i(
                     TAG,
                     "samples received: count=$samplesSinceLog windowMs=${now - lastLogAtMs} " +
-                        "lastPack=$lastPack latestUv=${String.format(Locale.US, "%.2f", latest)}",
+                        "lastPack=$lastPack latestVolts=${String.format(Locale.US, "%.4e", latestVolts)} " +
+                        "latestUv=${String.format(Locale.US, "%.2f", latest)}",
                 )
                 samplesSinceLog = 0
                 lastLogAtMs = now
@@ -588,7 +703,7 @@ class CallibriManager(
         }
         if (mapped != lastLoggedElectrode) {
             lastLoggedElectrode = mapped
-            Log.i(TAG, "electrode state: $mapped")
+            Log.i(TAG, "electrode state: CallibriElectrodeState.${electrode.name}")
         }
         _state.update { it.copy(electrode = mapped) }
     }
@@ -670,6 +785,8 @@ class CallibriManager(
                 deviceAddress = null,
                 batteryPercent = null,
                 electrode = null,
+                extSwInput = null,
+                adcInput = null,
                 streaming = false,
                 message = message,
                 messageIsError = message != null && isError,

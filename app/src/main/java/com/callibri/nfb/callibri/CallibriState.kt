@@ -34,6 +34,10 @@ data class CallibriState(
     val deviceAddress: String? = null,
     val batteryPercent: Int? = null,
     val electrode: ElectrodeContact? = null,
+    /** Read-back of SensorExternalSwitchInput, or a failure label if the setter did not stick. */
+    val extSwInput: String? = null,
+    /** Read-back of SensorADCInput, or a failure label if the setter did not stick. */
+    val adcInput: String? = null,
     val streaming: Boolean = false,
     val sampleRateHz: Int = FRE1Protocol.SAMPLE_RATE_HZ,
     val bluetoothEnabled: Boolean = true,

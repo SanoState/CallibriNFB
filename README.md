@@ -63,7 +63,11 @@ Logs use the tag `CallibriNFB` (scan, device found, connect, disconnect, EEG sta
 
 ## Signal path
 
+Before streaming, the app sets the EEG preset, 250 Hz, then the USB connector as the physiological input. In neurosdk2 1.0.6.18 that is `Callibri.setExtSwInput(SensorExternalSwitchInput.ExtSwInUSB)` and `Callibri.setADCInput(SensorADCInput.ADCInputResistance)`. There is no `ExtSwInMioUSB` enum in this AAR; `ExtSwInUSB` is the USB myographic source (BrainFlow's `ExternalSwitchInputMioUSB`). Both values are read back. If either setter is unsupported or the read-back does not match, EEG does not start and the screen shows the failure.
+
 `Callibri` raw samples are volts. The manager multiplies by 1,000,000 and passes microvolts to `EegProcessor`.
+
+The signal-source card shows the read-back `ExtSwInput`, `ADCInput`, electrode state, and the latest raw sample in volts and microvolts. `callibriElectrodeStateChanged` stays connected. NeuroSDK documents that callback as the electrode parameter and does not say it follows the USB switch, so it may still describe the built-in terminals.
 
 Each sample then goes through:
 
@@ -86,3 +90,6 @@ The integration was checked against the classes inside `neurosdk2-1.0.6.18`, not
 - 250 Hz is `SensorSamplingFrequency.FrequencyHz250`.
 - Scan family is `SensorFamily.SensorLECallibri`.
 - Electrode state is a real Callibri callback (`Normal`, `HighResistance`, `Detached`). It is wired, not simulated.
+- External switch input is `SensorExternalSwitchInput` (`getExtSwInput` / `setExtSwInput`). USB electrodes are `ExtSwInUSB` (index 2). The AAR has no `ExtSwInMioUSB`.
+- ADC input is `SensorADCInput` (`getADCInput` / `setADCInput`). Resistance is `ADCInputResistance` (index 3).
+- Support checks use `SensorParameter.ParameterExternalSwitchState` and `ParameterADCInputState`.
