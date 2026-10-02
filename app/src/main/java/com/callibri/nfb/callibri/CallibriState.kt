@@ -46,6 +46,12 @@ data class SignalIngress(
     val distinctValuesLastSecond: Int = 0,
     val samplesPerSecond: Int = 0,
     val droppedChunks: Long = 0,
+    /** Lowest getSamples() value in the last completed second. */
+    val minVoltsLastSecond: Double? = null,
+    /** Highest getSamples() value in the last completed second. */
+    val maxVoltsLastSecond: Double? = null,
+    /** Set when every sample in the last second sat on one code. */
+    val railNote: String? = null,
 )
 
 data class CallibriState(
@@ -59,6 +65,10 @@ data class CallibriState(
     val extSwInput: String? = null,
     /** Read-back of SensorADCInput, or a failure label if the setter did not stick. */
     val adcInput: String? = null,
+    /** Read-back of SensorGain, or a failure label if the setter did not stick. */
+    val gain: String? = null,
+    /** Read-back of SensorDataOffset, or a failure label if the setter did not stick. */
+    val dataOffset: String? = null,
     val signalIngress: SignalIngress = SignalIngress(),
     val streaming: Boolean = false,
     val sampleRateHz: Int = FRE1Protocol.SAMPLE_RATE_HZ,

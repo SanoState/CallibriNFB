@@ -63,11 +63,13 @@ Logs use the tag `CallibriNFB` (scan, device found, connect, disconnect, EEG sta
 
 ## Signal path
 
-Before streaming, the app sets the EEG preset, 250 Hz, then the USB connector as the physiological input. In neurosdk2 1.0.6.18 that is `Callibri.setExtSwInput(SensorExternalSwitchInput.ExtSwInUSB)` and `Callibri.setADCInput(SensorADCInput.ADCInputResistance)`. There is no `ExtSwInMioUSB` enum in this AAR; `ExtSwInUSB` is the USB myographic source (BrainFlow's `ExternalSwitchInputMioUSB`). Both values are read back. If either setter is unsupported or the read-back does not match, EEG does not start and the screen shows the failure.
+Before streaming, the app sets 250 Hz, then `setSignalType(CallibriSignalType.EEG)`. In neurosdk2 1.0.6.18 that preset writes Gain6, DataOffset3, ADCInputResistance, and ExtSwInElectrodes (the built-in terminals). The app then selects the USB connector with `setExtSwInput(SensorExternalSwitchInput.ExtSwInUSB)` and writes ADCInputResistance, Gain6, and DataOffset3 again. There is no `ExtSwInMioUSB` enum in this AAR; `ExtSwInUSB` is the USB myographic source (BrainFlow's `ExternalSwitchInputMioUSB`). All four values are read back. If a setter is unsupported or the read-back does not match, EEG does not start. After `StartSignal` they are read again, and rewritten if the start command changed them.
+
+A frozen `1.2604e-02 V` is not a 12.6 mV EEG offset. NeuroSDK converts each int16 as `code * 2^offset * 2.8848651510316313e-7 / gain`, so int16 32767 at Gain6 and DataOffset3 is exactly that voltage: the ADC is pinned at positive full scale. The signal-source card shows gain, offset, and the raw peak-to-peak of the last second.
 
 `Callibri` raw samples are volts. The manager multiplies by 1,000,000 and passes microvolts to `EegProcessor`.
 
-The signal-source card shows the read-back `ExtSwInput`, `ADCInput`, electrode state, and the latest raw sample in volts and microvolts. It also shows the NeuroSDK callback itself: callback count and rate, `getPackNum()`, whether that number is changing, `getSamples()` length, and the first, last, minimum, and maximum volts in the latest packet, plus how many distinct raw values arrived in the last second. The first eight callbacks are written to logcat under `CallibriNFB`, and a one-second summary follows. Every finite sample from `getSamples()` is still copied and multiplied by 1,000,000 before it enters `EegProcessor`. `callibriElectrodeStateChanged` stays connected. NeuroSDK documents that callback as the electrode parameter and does not say it follows the USB switch, so it may still describe the built-in terminals.
+The signal-source card shows the read-back `ExtSwInput`, `ADCInput`, gain, offset, electrode state, the latest raw sample in volts and microvolts, and the raw peak-to-peak of the last second. It also shows the NeuroSDK callback itself: callback count and rate, `getPackNum()`, whether that number is changing, `getSamples()` length, and the first, last, minimum, and maximum volts in the latest packet, plus how many distinct raw values arrived in the last second. The first eight callbacks are written to logcat under `CallibriNFB`, and a one-second summary follows. Every finite sample from `getSamples()` is still copied and multiplied by 1,000,000 before it enters `EegProcessor`. `callibriElectrodeStateChanged` stays connected. NeuroSDK documents that callback as the electrode parameter and does not say it follows the USB switch, so it may still describe the built-in terminals.
 
 Each sample then goes through:
 
@@ -92,4 +94,7 @@ The integration was checked against the classes inside `neurosdk2-1.0.6.18`, not
 - Electrode state is a real Callibri callback (`Normal`, `HighResistance`, `Detached`). It is wired, not simulated.
 - External switch input is `SensorExternalSwitchInput` (`getExtSwInput` / `setExtSwInput`). USB electrodes are `ExtSwInUSB` (index 2). The AAR has no `ExtSwInMioUSB`.
 - ADC input is `SensorADCInput` (`getADCInput` / `setADCInput`). Resistance is `ADCInputResistance` (index 3).
-- Support checks use `SensorParameter.ParameterExternalSwitchState` and `ParameterADCInputState`.
+- Gain is `SensorGain` (`getGain` / `setGain`). EEG uses `Gain6` (index 4).
+- Offset is `SensorDataOffset` (`getDataOffset` / `setDataOffset`). EEG uses `DataOffset3` (index 3).
+- Support checks use `ParameterExternalSwitchState`, `ParameterADCInputState`, `ParameterGain`, and `ParameterOffset`.
+- `setSignalType(EEG)` also selects `ExtSwInElectrodes`. USB mode is applied after the preset.

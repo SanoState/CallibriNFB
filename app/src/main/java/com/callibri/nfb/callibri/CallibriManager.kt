@@ -16,8 +16,10 @@ import com.neurosdk2.neuro.types.CallibriElectrodeState
 import com.neurosdk2.neuro.types.CallibriSignalType
 import com.neurosdk2.neuro.types.SensorADCInput
 import com.neurosdk2.neuro.types.SensorCommand
+import com.neurosdk2.neuro.types.SensorDataOffset
 import com.neurosdk2.neuro.types.SensorExternalSwitchInput
 import com.neurosdk2.neuro.types.SensorFamily
+import com.neurosdk2.neuro.types.SensorGain
 import com.neurosdk2.neuro.types.SensorInfo
 import com.neurosdk2.neuro.types.SensorParameter
 import com.neurosdk2.neuro.types.SensorSamplingFrequency
@@ -89,6 +91,8 @@ class CallibriManager(
     private var callbackCount = 0L
     private var callbacksThisSecond = 0
     private var distinctThisSecond = HashSet<Long>()
+    private var secondMinVolts = Double.POSITIVE_INFINITY
+    private var secondMaxVolts = Double.NEGATIVE_INFINITY
     private var lastSeenPackNum: Int? = null
     private var packNumChangedThisSecond = false
     private var callbacksLogged = 0
@@ -450,45 +454,70 @@ class CallibriManager(
         val sampling = SensorSamplingFrequency.FrequencyHz250
         val extSw = SensorExternalSwitchInput.ExtSwInUSB
         val adc = SensorADCInput.ADCInputResistance
+        val gain = SensorGain.Gain6
+        val offset = SensorDataOffset.DataOffset3
         Log.i(
             TAG,
             "EEG configure enums: CallibriSignalType.${signalType.name} " +
                 "SensorSamplingFrequency.${sampling.name} " +
                 "SensorExternalSwitchInput.${extSw.name} " +
-                "SensorADCInput.${adc.name}",
+                "SensorADCInput.${adc.name} " +
+                "SensorGain.${gain.name} " +
+                "SensorDataOffset.${offset.name}",
         )
-        callibri.signalType = signalType
         if (callibri.isSupportedParameter(SensorParameter.ParameterSamplingFrequency)) {
             callibri.setSamplingFrequency(sampling)
         } else {
             Log.w(TAG, "sampling frequency parameter is not supported; reading the current rate")
         }
         val rate = describedRate(callibri)
-        Log.i(
-            TAG,
-            "configured EEG preset=${callibri.signalType} rate=$rate Hz (${callibri.samplingFrequency}) " +
-                "startSignal=${callibri.isSupportedCommand(SensorCommand.StartSignal)}",
-        )
         if (rate != FRE1Protocol.SAMPLE_RATE_HZ) {
             throw IllegalStateException("Callibri sampling rate is $rate Hz; expected ${FRE1Protocol.SAMPLE_RATE_HZ} Hz")
         }
-        // Signal-type preset is applied first. ExtSw and ADC are set after it so the
-        // preset cannot leave the built-in terminals selected.
-        val extSwRead = writeExtSw(callibri, extSw)
-        val adcRead = writeAdc(callibri, adc)
-        val extSwAfterAdc = readExtSw(callibri)
-        if (extSwAfterAdc != extSw) {
-            val detail = "ExtSwInput read back ${extSwAfterAdc?.name ?: "null"} after ADC was set; wanted ${extSw.name}."
+        // Native setSignalType(EEG) writes Gain6, ADCInputResistance, DataOffset3, and
+        // ExtSwInElectrodes (the built-in terminals). USB has to be selected after that,
+        // and gain/offset written again so the terminal preset cannot leave the ADC pinned.
+        callibri.signalType = signalType
+        Log.i(
+            TAG,
+            "after setSignalType preset=${callibri.signalType} rate=$rate Hz " +
+                "frontEnd=${describeFrontEnd(readFrontEnd(callibri))}",
+        )
+        writeExtSw(callibri, extSw)
+        writeAdc(callibri, adc)
+        val gainRead = writeGain(callibri, gain)
+        val offsetRead = writeOffset(callibri, offset)
+        val extSwAfter = readExtSw(callibri)
+        val adcAfter = readAdc(callibri)
+        if (extSwAfter != extSw || adcAfter != adc) {
+            val detail = "Front end read back ExtSwInput=${extSwAfter?.name ?: "null"} " +
+                "ADCInput=${adcAfter?.name ?: "null"} after gain and offset; wanted ${extSw.name} and ${adc.name}."
             Log.e(TAG, detail)
-            _state.update { it.copy(extSwInput = extSwAfterAdc?.name ?: "read failed", adcInput = adcRead.name) }
+            _state.update {
+                it.copy(
+                    extSwInput = extSwAfter?.name ?: "read failed",
+                    adcInput = adcAfter?.name ?: "read failed",
+                    gain = gainRead.name,
+                    dataOffset = offsetRead.name,
+                )
+            }
             throw IllegalStateException(detail)
         }
         Log.i(
             TAG,
-            "EEG input confirmed ExtSwInput=${extSwRead.name} index=${extSwRead.index()} " +
-                "ADCInput=${adcRead.name} index=${adcRead.index()}",
+            "EEG input confirmed ExtSwInput=${extSwAfter.name} index=${extSwAfter.index()} " +
+                "ADCInput=${adcAfter.name} index=${adcAfter.index()} " +
+                "Gain=${gainRead.name} index=${gainRead.index()} " +
+                "DataOffset=${offsetRead.name} index=${offsetRead.index()}",
         )
-        _state.update { it.copy(extSwInput = extSwRead.name, adcInput = adcRead.name) }
+        _state.update {
+            it.copy(
+                extSwInput = extSwAfter.name,
+                adcInput = adcAfter.name,
+                gain = gainRead.name,
+                dataOffset = offsetRead.name,
+            )
+        }
     }
 
     private fun writeExtSw(callibri: Callibri, wanted: SensorExternalSwitchInput): SensorExternalSwitchInput {
@@ -545,6 +574,60 @@ class CallibriManager(
         return read
     }
 
+    private fun writeGain(callibri: Callibri, wanted: SensorGain): SensorGain {
+        if (!supports(callibri, SensorParameter.ParameterGain)) {
+            val detail = "Gain is not supported. Wanted SensorGain.${wanted.name}."
+            Log.e(TAG, detail)
+            _state.update { it.copy(gain = "unsupported") }
+            throw IllegalStateException(detail)
+        }
+        try {
+            callibri.setGain(wanted)
+        } catch (error: Exception) {
+            val detail = "Gain setter failed for SensorGain.${wanted.name}: ${error.message ?: error.javaClass.simpleName}"
+            Log.e(TAG, detail, error)
+            _state.update { it.copy(gain = "set failed") }
+            throw IllegalStateException(detail, error)
+        }
+        val read = readGain(callibri)
+        Log.i(TAG, "Gain set SensorGain.${wanted.name} readBack=${read?.name ?: "null"} index=${read?.index()}")
+        if (read != wanted) {
+            val detail = "Gain read back ${read?.name ?: "null"}; wanted ${wanted.name}."
+            Log.e(TAG, detail)
+            _state.update { it.copy(gain = read?.name ?: "read failed") }
+            throw IllegalStateException(detail)
+        }
+        _state.update { it.copy(gain = read.name) }
+        return read
+    }
+
+    private fun writeOffset(callibri: Callibri, wanted: SensorDataOffset): SensorDataOffset {
+        if (!supports(callibri, SensorParameter.ParameterOffset)) {
+            val detail = "DataOffset is not supported. Wanted SensorDataOffset.${wanted.name}."
+            Log.e(TAG, detail)
+            _state.update { it.copy(dataOffset = "unsupported") }
+            throw IllegalStateException(detail)
+        }
+        try {
+            callibri.setDataOffset(wanted)
+        } catch (error: Exception) {
+            val detail = "DataOffset setter failed for SensorDataOffset.${wanted.name}: ${error.message ?: error.javaClass.simpleName}"
+            Log.e(TAG, detail, error)
+            _state.update { it.copy(dataOffset = "set failed") }
+            throw IllegalStateException(detail, error)
+        }
+        val read = readOffset(callibri)
+        Log.i(TAG, "DataOffset set SensorDataOffset.${wanted.name} readBack=${read?.name ?: "null"} index=${read?.index()}")
+        if (read != wanted) {
+            val detail = "DataOffset read back ${read?.name ?: "null"}; wanted ${wanted.name}."
+            Log.e(TAG, detail)
+            _state.update { it.copy(dataOffset = read?.name ?: "read failed") }
+            throw IllegalStateException(detail)
+        }
+        _state.update { it.copy(dataOffset = read.name) }
+        return read
+    }
+
     private fun readExtSw(callibri: Callibri): SensorExternalSwitchInput? =
         try {
             callibri.extSwInput
@@ -560,6 +643,69 @@ class CallibriManager(
             Log.e(TAG, "ADCInput read failed", error)
             null
         }
+
+    private fun readGain(callibri: Callibri): SensorGain? =
+        try {
+            callibri.getGain()
+        } catch (error: Exception) {
+            Log.e(TAG, "Gain read failed", error)
+            null
+        }
+
+    private fun readOffset(callibri: Callibri): SensorDataOffset? =
+        try {
+            callibri.getDataOffset()
+        } catch (error: Exception) {
+            Log.e(TAG, "DataOffset read failed", error)
+            null
+        }
+
+    private fun readFrontEnd(callibri: Callibri): FrontEnd =
+        FrontEnd(readExtSw(callibri), readAdc(callibri), readGain(callibri), readOffset(callibri))
+
+    private fun describeFrontEnd(front: FrontEnd): String =
+        "ExtSwInput=${front.extSw?.name ?: "null"} ADCInput=${front.adc?.name ?: "null"} " +
+            "Gain=${front.gain?.name ?: "null"} DataOffset=${front.offset?.name ?: "null"}"
+
+    /**
+     * StartSignal does not resend the EEG preset, but a firmware that latches the
+     * terminal preset at start would put the ADC back on the built-in terminals.
+     * Read the four analog settings and write the USB EEG front end again if any drifted.
+     */
+    private fun confirmFrontEndAfterStart(callibri: Callibri) {
+        val wantedExt = SensorExternalSwitchInput.ExtSwInUSB
+        val wantedAdc = SensorADCInput.ADCInputResistance
+        val wantedGain = SensorGain.Gain6
+        val wantedOffset = SensorDataOffset.DataOffset3
+        var front = readFrontEnd(callibri)
+        Log.i(TAG, "after StartSignal ${describeFrontEnd(front)}")
+        val drifted = front.extSw != wantedExt || front.adc != wantedAdc ||
+            front.gain != wantedGain || front.offset != wantedOffset
+        if (drifted) {
+            Log.w(
+                TAG,
+                "front end changed when signal started; writing ExtSwInUSB, ADCInputResistance, Gain6, DataOffset3 again",
+            )
+            try {
+                writeExtSw(callibri, wantedExt)
+                writeAdc(callibri, wantedAdc)
+                writeGain(callibri, wantedGain)
+                writeOffset(callibri, wantedOffset)
+            } catch (error: Exception) {
+                Log.e(TAG, "front end rewrite after StartSignal failed", error)
+            }
+            front = readFrontEnd(callibri)
+            Log.i(TAG, "after StartSignal rewrite ${describeFrontEnd(front)}")
+        }
+        _state.update {
+            it.copy(
+                extSwInput = front.extSw?.name ?: "read failed",
+                adcInput = front.adc?.name ?: "read failed",
+                gain = front.gain?.name ?: "read failed",
+                dataOffset = front.offset?.name ?: "read failed",
+            )
+        }
+    }
 
     private fun supports(callibri: Callibri, parameter: SensorParameter): Boolean =
         try {
@@ -618,9 +764,11 @@ class CallibriManager(
             throw error
         }
         streaming = true
+        confirmFrontEndAfterStart(callibri)
         Log.i(
             TAG,
-            "EEG start ExtSwInput=${_state.value.extSwInput} ADCInput=${_state.value.adcInput}. " +
+            "EEG start ExtSwInput=${_state.value.extSwInput} ADCInput=${_state.value.adcInput} " +
+                "Gain=${_state.value.gain} DataOffset=${_state.value.dataOffset}. " +
                 "callibriElectrodeStateChanged stays subscribed. NeuroSDK documents that callback as the electrode parameter and does not say it follows ExtSwInUSB.",
         )
         publishElectrode(readElectrode(callibri))
@@ -708,6 +856,8 @@ class CallibriManager(
                 for (volts in samples) {
                     if (volts < minVolts) minVolts = volts
                     if (volts > maxVolts) maxVolts = volts
+                    if (volts < secondMinVolts) secondMinVolts = volts
+                    if (volts > secondMaxVolts) secondMaxVolts = volts
                     distinctThisSecond.add(volts.toRawBits())
                     merged.add(volts * VOLTS_TO_MICROVOLTS)
                 }
@@ -742,12 +892,19 @@ class CallibriManager(
             val now = SystemClock.elapsedRealtime()
             val secondElapsed = now - lastLogAtMs >= 1_000L
             if (secondElapsed) {
+                val hadSamples = samplesSinceLog > 0 && secondMinVolts.isFinite() && secondMaxVolts.isFinite()
+                val spanVolts = if (hadSamples) secondMaxVolts - secondMinVolts else Double.NaN
+                val secondMin = if (hadSamples) secondMinVolts else null
+                val secondMax = if (hadSamples) secondMaxVolts else null
                 ingress = ingress.copy(
                     callbacksPerSecond = callbacksThisSecond,
                     packNumChanging = packNumChangedThisSecond,
                     distinctValuesLastSecond = distinctThisSecond.size,
                     samplesPerSecond = samplesSinceLog,
                     droppedChunks = droppedChunks,
+                    minVoltsLastSecond = secondMin,
+                    maxVoltsLastSecond = secondMax,
+                    railNote = railNote(secondMin, secondMax),
                 )
                 Log.i(
                     TAG,
@@ -757,12 +914,18 @@ class CallibriManager(
                         "callbackSamples=$callbackSamples packetSamples=$latestPacketSamples " +
                         "first=${formatVolts(ingress.firstVolts)} last=${formatVolts(ingress.lastVolts)} " +
                         "min=${formatVolts(ingress.minVolts)} max=${formatVolts(ingress.maxVolts)} " +
+                        "secondMin=${formatVolts(ingress.minVoltsLastSecond)} " +
+                        "secondMax=${formatVolts(ingress.maxVoltsLastSecond)} " +
+                        "spanV=${if (spanVolts.isFinite()) formatVolts(spanVolts) else "none"} " +
                         "distinct=${distinctThisSecond.size} samplesPerSec=$samplesSinceLog " +
-                        "droppedChunks=$droppedChunks windowMs=${now - lastLogAtMs}",
+                        "droppedChunks=$droppedChunks windowMs=${now - lastLogAtMs} " +
+                        "rail=${ingress.railNote ?: "no"}",
                 )
                 callbacksThisSecond = 0
                 samplesSinceLog = 0
                 distinctThisSecond.clear()
+                secondMinVolts = Double.POSITIVE_INFINITY
+                secondMaxVolts = Double.NEGATIVE_INFINITY
                 packNumChangedThisSecond = false
                 lastLogAtMs = now
             }
@@ -806,6 +969,8 @@ class CallibriManager(
         callbacksThisSecond = 0
         samplesSinceLog = 0
         distinctThisSecond.clear()
+        secondMinVolts = Double.POSITIVE_INFINITY
+        secondMaxVolts = Double.NEGATIVE_INFINITY
         lastSeenPackNum = null
         packNumChangedThisSecond = false
         callbacksLogged = 0
@@ -912,6 +1077,8 @@ class CallibriManager(
                 electrode = null,
                 extSwInput = null,
                 adcInput = null,
+                gain = null,
+                dataOffset = null,
                 signalIngress = SignalIngress(),
                 streaming = false,
                 message = message,
@@ -980,9 +1147,37 @@ class CallibriManager(
         SensorSamplingFrequency.FrequencyUnsupported -> 0
     }
 
+    /**
+     * neurosdk parseSignal converts each int16 as
+     * `code * 2^offsetIndex * 2.8848651510316313e-7 / gain`.
+     * At Gain6 and DataOffset3, +32767 is 1.2604e-02 V. A frozen reading at that
+     * value means every sample is the positive rail, not a 12.6 mV EEG baseline.
+     */
+    private fun railNote(minVolts: Double?, maxVolts: Double?): String? {
+        if (minVolts == null || maxVolts == null || maxVolts - minVolts > 1e-6) return null
+        val mid = (minVolts + maxVolts) / 2.0
+        return when {
+            kotlin.math.abs(mid - POSITIVE_FULL_SCALE_VOLTS) < 2e-6 ->
+                "ADC pinned at +full scale. Gain6 and DataOffset3 turn int16 32767 into 1.2604e-02 V."
+            kotlin.math.abs(mid - NEGATIVE_FULL_SCALE_VOLTS) < 2e-6 ->
+                "ADC pinned at −full scale."
+            else -> "Raw samples are constant."
+        }
+    }
+
+    private data class FrontEnd(
+        val extSw: SensorExternalSwitchInput?,
+        val adc: SensorADCInput?,
+        val gain: SensorGain?,
+        val offset: SensorDataOffset?,
+    )
+
     private companion object {
         const val TAG = "CallibriNFB"
         const val VOLTS_TO_MICROVOLTS = 1_000_000.0
         const val LOGGED_CALLBACKS = 8
+        const val VOLTS_PER_COUNT = 2.8848651510316313e-7
+        const val POSITIVE_FULL_SCALE_VOLTS = 32767.0 * 8.0 * VOLTS_PER_COUNT / 6.0
+        const val NEGATIVE_FULL_SCALE_VOLTS = -32768.0 * 8.0 * VOLTS_PER_COUNT / 6.0
     }
 }

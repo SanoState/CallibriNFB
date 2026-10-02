@@ -600,9 +600,16 @@ private fun SignalTrace(samples: List<Float>) {
 private fun SignalSourceLines(ui: MainUiState) {
     Text("ExtSwInput: ${ui.extSwInput ?: "—"}")
     Text("ADCInput: ${ui.adcInput ?: "—"}")
+    Text("Gain: ${ui.gain ?: "—"}")
+    Text("Offset: ${ui.dataOffset ?: "—"}")
     Text("Electrode: ${electrodeDiagnostic(ui.electrode)}")
     Text("Incoming raw: ${ui.latestRawUv?.let(::formatVolts) ?: "—"}")
     Text("Converted: ${ui.latestRawUv?.let(::formatMicrovolts) ?: "—"}")
+    val span = rawSpanMicrovolts(ui.signalIngress)
+    Text("Raw span last second: ${span?.let(::formatMicrovolts) ?: "—"}")
+    ui.signalIngress.railNote?.let { note ->
+        Text(note, color = MaterialTheme.colorScheme.error)
+    }
 }
 
 @Composable
@@ -635,6 +642,13 @@ private fun electrodeDiagnostic(electrode: ElectrodeContact?): String = when (el
     ElectrodeContact.HighResistance -> "HighResistance"
     ElectrodeContact.Detached -> "Detached"
     null -> "—"
+}
+
+private fun rawSpanMicrovolts(ingress: SignalIngress): Double? {
+    val min = ingress.minVoltsLastSecond ?: return null
+    val max = ingress.maxVoltsLastSecond ?: return null
+    if (!min.isFinite() || !max.isFinite()) return null
+    return (max - min) * 1_000_000.0
 }
 
 private fun formatMicrovolts(value: Double): String =
