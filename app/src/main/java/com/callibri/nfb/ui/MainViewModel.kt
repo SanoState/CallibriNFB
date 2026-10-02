@@ -205,6 +205,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         manager.startEeg()
     }
 
+    fun selectAdcInput(label: String) {
+        manager.selectAdcInput(label)
+    }
+
     fun stopEeg() {
         manager.stopEeg()
     }

@@ -63,7 +63,7 @@ Logs use the tag `CallibriNFB` (scan, device found, connect, disconnect, EEG sta
 
 ## Signal path
 
-Before streaming, the app sets 250 Hz, then `setSignalType(CallibriSignalType.EEG)`. In neurosdk2 1.0.6.18 that preset writes Gain6, DataOffset3, ADCInputResistance, and ExtSwInElectrodes (the built-in terminals). The app then selects the USB connector with `setExtSwInput(SensorExternalSwitchInput.ExtSwInUSB)` and writes ADCInputResistance, Gain6, and DataOffset3 again. There is no `ExtSwInMioUSB` enum in this AAR; `ExtSwInUSB` is the USB myographic source (BrainFlow's `ExternalSwitchInputMioUSB`). All four values are read back. If a setter is unsupported or the read-back does not match, EEG does not start. After `StartSignal` they are read again, and rewritten if the start command changed them.
+Before streaming, the app sets 250 Hz, then `setSignalType(CallibriSignalType.EEG)`. In neurosdk2 1.0.6.18 that preset writes Gain6, DataOffset3, ADCInputResistance, and ExtSwInElectrodes (the built-in terminals). The app then selects the USB connector with `setExtSwInput(SensorExternalSwitchInput.ExtSwInUSB)` and writes Gain6 and DataOffset3 again. The ADC input starts on `ADCInputElectrodes` (the physiological input). `ADCInputResistance` is the documented EEG preset, and on this sensor it holds every sample at int16 32767. The signal-source card can switch among Electrodes, Short, Test, and Resistance while streaming. Short should sit near 0 V. Test should be a 1 Hz square wave of about ±1 mV. There is no `ExtSwInMioUSB` enum in this AAR; `ExtSwInUSB` is the USB myographic source (BrainFlow's `ExternalSwitchInputMioUSB`). All four values are read back. If a setter is unsupported or the read-back does not match, EEG does not start. After `StartSignal` they are read again, and rewritten if the start command changed them.
 
 A frozen `1.2604e-02 V` is not a 12.6 mV EEG offset. NeuroSDK converts each int16 as `code * 2^offset * 2.8848651510316313e-7 / gain`, so int16 32767 at Gain6 and DataOffset3 is exactly that voltage: the ADC is pinned at positive full scale. The signal-source card shows gain, offset, and the raw peak-to-peak of the last second.
 
@@ -93,7 +93,7 @@ The integration was checked against the classes inside `neurosdk2-1.0.6.18`, not
 - Scan family is `SensorFamily.SensorLECallibri`.
 - Electrode state is a real Callibri callback (`Normal`, `HighResistance`, `Detached`). It is wired, not simulated.
 - External switch input is `SensorExternalSwitchInput` (`getExtSwInput` / `setExtSwInput`). USB electrodes are `ExtSwInUSB` (index 2). The AAR has no `ExtSwInMioUSB`.
-- ADC input is `SensorADCInput` (`getADCInput` / `setADCInput`). Resistance is `ADCInputResistance` (index 3).
+- ADC input is `SensorADCInput` (`getADCInput` / `setADCInput`). Streaming starts on `ADCInputElectrodes` (index 0). Resistance is index 3, Short is 1, Test is 2.
 - Gain is `SensorGain` (`getGain` / `setGain`). EEG uses `Gain6` (index 4).
 - Offset is `SensorDataOffset` (`getDataOffset` / `setDataOffset`). EEG uses `DataOffset3` (index 3).
 - Support checks use `ParameterExternalSwitchState`, `ParameterADCInputState`, `ParameterGain`, and `ParameterOffset`.

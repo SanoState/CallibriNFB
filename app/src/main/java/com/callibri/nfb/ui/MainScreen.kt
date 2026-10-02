@@ -144,6 +144,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         onHighChange = viewModel::updateHigh,
                         onApply = viewModel::applyBands,
                         onToggleEeg = { if (ui.streaming) viewModel.stopEeg() else viewModel.startEeg() },
+                        onSelectAdc = viewModel::selectAdcInput,
                         onDisconnect = viewModel::disconnect,
                         onAutoChange = viewModel::setAutoThreshold,
                         onTargetChange = viewModel::updateTarget,
@@ -248,6 +249,7 @@ private fun ConnectedSection(
     onHighChange: (String, String) -> Unit,
     onApply: () -> Unit,
     onToggleEeg: () -> Unit,
+    onSelectAdc: (String) -> Unit,
     onDisconnect: () -> Unit,
     onAutoChange: (Boolean) -> Unit,
     onTargetChange: (String, String) -> Unit,
@@ -276,6 +278,7 @@ private fun ConnectedSection(
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("Signal source", fontWeight = FontWeight.Medium)
             SignalSourceLines(ui)
+            AdcInputChoices(selected = ui.adcInput, onSelect = onSelectAdc)
             PacketDiagnostics(ui.signalIngress)
         }
     }
@@ -593,6 +596,37 @@ private fun SignalTrace(samples: List<Float>) {
                 cap = StrokeCap.Round,
             )
         }
+    }
+}
+
+@Composable
+private fun AdcInputChoices(selected: String?, onSelect: (String) -> Unit) {
+    Text(
+        "ADC input. Resistance pinned this sensor at full scale. Electrodes is the physiological input. Short should sit near 0 V. Test is a 1 Hz square wave, about ±1 mV.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        AdcChoice("Electrodes", selected, onSelect, Modifier.weight(1f))
+        AdcChoice("Short", selected, onSelect, Modifier.weight(1f))
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        AdcChoice("Test", selected, onSelect, Modifier.weight(1f))
+        AdcChoice("Resistance", selected, onSelect, Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun AdcChoice(
+    label: String,
+    selected: String?,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val active = selected == "ADCInput$label"
+    if (active) {
+        Button(onClick = { onSelect(label) }, modifier = modifier) { Text(label) }
+    } else {
+        OutlinedButton(onClick = { onSelect(label) }, modifier = modifier) { Text(label) }
     }
 }
 

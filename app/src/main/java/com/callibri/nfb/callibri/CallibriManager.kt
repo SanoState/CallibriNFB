@@ -100,6 +100,12 @@ class CallibriManager(
     private var lastDiagUiMs = 0L
     private var ingress = SignalIngress()
 
+    /**
+     * ADCInputResistance is the EEG preset, and on this sensor it sits on int16 +32767.
+     * ADCInputElectrodes is the physiological input. Short and Test are live checks.
+     */
+    private var selectedAdc = SensorADCInput.ADCInputElectrodes
+
     fun refreshRadioState() {
         scope.launch(sdkDispatcher) {
             _state.update { it.withRadio() }
@@ -128,6 +134,33 @@ class CallibriManager(
                 connectLocked(address)
             } finally {
                 connectGate.set(false)
+            }
+        }
+    }
+
+    fun selectAdcInput(label: String) {
+        val wanted = when (label) {
+            "Electrodes" -> SensorADCInput.ADCInputElectrodes
+            "Short" -> SensorADCInput.ADCInputShort
+            "Test" -> SensorADCInput.ADCInputTest
+            "Resistance" -> SensorADCInput.ADCInputResistance
+            else -> return
+        }
+        selectedAdc = wanted
+        scope.launch(sdkDispatcher) {
+            val callibri = sensor ?: return@launch
+            try {
+                writeAdc(callibri, wanted)
+                restoreUsbGainOffset(callibri)
+                Log.i(TAG, "ADC input switched to ${wanted.name}; ${describeFrontEnd(readFrontEnd(callibri))}")
+            } catch (error: Exception) {
+                Log.e(TAG, "ADC input switch to ${wanted.name} failed", error)
+                _state.update {
+                    it.copy(
+                        message = "ADC input ${wanted.name} did not stick: ${error.message ?: "unknown error"}",
+                        messageIsError = true,
+                    )
+                }
             }
         }
     }
@@ -453,7 +486,7 @@ class CallibriManager(
         val signalType = CallibriSignalType.EEG
         val sampling = SensorSamplingFrequency.FrequencyHz250
         val extSw = SensorExternalSwitchInput.ExtSwInUSB
-        val adc = SensorADCInput.ADCInputResistance
+        val adc = selectedAdc
         val gain = SensorGain.Gain6
         val offset = SensorDataOffset.DataOffset3
         Log.i(
@@ -660,6 +693,16 @@ class CallibriManager(
             null
         }
 
+    private fun restoreUsbGainOffset(callibri: Callibri) {
+        if (readExtSw(callibri) != SensorExternalSwitchInput.ExtSwInUSB) {
+            writeExtSw(callibri, SensorExternalSwitchInput.ExtSwInUSB)
+        }
+        if (readGain(callibri) != SensorGain.Gain6) writeGain(callibri, SensorGain.Gain6)
+        if (readOffset(callibri) != SensorDataOffset.DataOffset3) {
+            writeOffset(callibri, SensorDataOffset.DataOffset3)
+        }
+    }
+
     private fun readFrontEnd(callibri: Callibri): FrontEnd =
         FrontEnd(readExtSw(callibri), readAdc(callibri), readGain(callibri), readOffset(callibri))
 
@@ -674,7 +717,7 @@ class CallibriManager(
      */
     private fun confirmFrontEndAfterStart(callibri: Callibri) {
         val wantedExt = SensorExternalSwitchInput.ExtSwInUSB
-        val wantedAdc = SensorADCInput.ADCInputResistance
+        val wantedAdc = selectedAdc
         val wantedGain = SensorGain.Gain6
         val wantedOffset = SensorDataOffset.DataOffset3
         var front = readFrontEnd(callibri)
@@ -684,7 +727,7 @@ class CallibriManager(
         if (drifted) {
             Log.w(
                 TAG,
-                "front end changed when signal started; writing ExtSwInUSB, ADCInputResistance, Gain6, DataOffset3 again",
+                "front end changed when signal started; writing ExtSwInUSB, ${wantedAdc.name}, Gain6, DataOffset3 again",
             )
             try {
                 writeExtSw(callibri, wantedExt)
@@ -1033,6 +1076,7 @@ class CallibriManager(
         val wasStreaming = streaming
         streaming = false
         lastLoggedElectrode = null
+        selectedAdc = SensorADCInput.ADCInputElectrodes
         val name = try {
             current.name
         } catch (_: Exception) {
@@ -1158,7 +1202,7 @@ class CallibriManager(
         val mid = (minVolts + maxVolts) / 2.0
         return when {
             kotlin.math.abs(mid - POSITIVE_FULL_SCALE_VOLTS) < 2e-6 ->
-                "ADC pinned at +full scale. Gain6 and DataOffset3 turn int16 32767 into 1.2604e-02 V."
+                "ADC pinned at +full scale. That is int16 32767, not EEG. Try Electrodes, Short, or Test below."
             kotlin.math.abs(mid - NEGATIVE_FULL_SCALE_VOLTS) < 2e-6 ->
                 "ADC pinned at −full scale."
             else -> "Raw samples are constant."
