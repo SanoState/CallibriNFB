@@ -1,6 +1,8 @@
 # Callibri NFB
 
-Android app for one [Callibri](https://brainbit.com/) EEG sensor. It scans, connects, streams 250 Hz raw EEG through BrainBit NeuroSDK 2, converts volts to microvolts, and shows three live FRE1 band amplitudes plus a continuous neurofeedback reward. The smoothed reward sets the volume of a built-in test tone. It does not change the phone's media volume, draw an overlay, or run a background service. Sessions are not saved.
+Android app for one [Callibri](https://brainbit.com/) EEG sensor. It scans, connects, streams 250 Hz raw EEG through BrainBit NeuroSDK 2, converts volts to microvolts, and shows three live FRE1 band amplitudes plus a continuous neurofeedback reward. The smoothed reward sets the volume of a built-in test tone. It does not change the phone's media volume or other apps' audio. Sessions are not saved.
+
+Starting EEG also starts a foreground service so the same session keeps running when you leave the app. Floating feedback is off until you turn it on. That asks for permission to display over other apps, then shows a small draggable overlay with the smoothed reward.
 
 ## Stack
 
@@ -48,6 +50,7 @@ Unit tests for the filters, rolling thresholds, and reward math (no device requi
 11. **Auto threshold: OFF** shows a manual µV field on each band. Change window, target %, weights, minimum reward, or smoothing, then tap **Apply feedback settings**. Out-of-range values are rejected.
 12. Edit any band's low/high Hz and tap **Apply bands**. The amplitudes follow the new ranges, and the reward history starts over. Defaults are only a starting point; they are not built into the filter code.
 13. **Stop EEG** / **Start EEG** and **Disconnect** can be used more than once.
+14. With EEG running, turn on **Floating feedback**. Android opens the display-over-apps setting the first time. After you allow it, a small draggable overlay shows the smoothed reward. Leave Callibri NFB and the same session keeps streaming, scoring, and playing the test tone. **Stop** on the overlay or the notification ends that session.
 
 ## Reward math
 

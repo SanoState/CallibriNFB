@@ -1,7 +1,10 @@
 package com.callibri.nfb.ui
 
+import android.Manifest
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.os.SystemClock
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -69,12 +72,22 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
     ) { result ->
         viewModel.onPermissionResult(result.values.all { it })
     }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {
+        viewModel.refreshEnvironment()
+        viewModel.startEeg()
+    }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
+                Lifecycle.Event.ON_START -> viewModel.setActivityForeground(true)
                 Lifecycle.Event.ON_RESUME -> viewModel.refreshEnvironment()
-                Lifecycle.Event.ON_STOP -> viewModel.onScreenDisposed()
+                Lifecycle.Event.ON_STOP -> {
+                    viewModel.setActivityForeground(false)
+                    viewModel.onScreenDisposed()
+                }
                 else -> Unit
             }
         }
@@ -144,7 +157,28 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         onLowChange = viewModel::updateLow,
                         onHighChange = viewModel::updateHigh,
                         onApply = viewModel::applyBands,
-                        onToggleEeg = { if (ui.streaming) viewModel.stopEeg() else viewModel.startEeg() },
+                        onToggleEeg = {
+                            if (ui.streaming) {
+                                viewModel.stopEeg()
+                            } else if (Build.VERSION.SDK_INT >= 33 && !ui.notificationPermissionGranted) {
+                                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            } else {
+                                viewModel.startEeg()
+                            }
+                        },
+                        onOverlayWanted = { checked ->
+                            if (checked && !Settings.canDrawOverlays(context)) {
+                                viewModel.setOverlayWanted(true)
+                                context.startActivity(
+                                    Intent(
+                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                        Uri.parse("package:${context.packageName}"),
+                                    ),
+                                )
+                            } else {
+                                viewModel.setOverlayWanted(checked)
+                            }
+                        },
                         onSelectAdc = viewModel::selectAdcInput,
                         onDisconnect = viewModel::disconnect,
                         onAutoChange = viewModel::setAutoThreshold,
@@ -268,6 +302,7 @@ private fun ConnectedSection(
     onStopAudio: () -> Unit,
     onManualFeedback: (Boolean) -> Unit,
     onManualPercent: (Double) -> Unit,
+    onOverlayWanted: (Boolean) -> Unit,
 ) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -327,6 +362,7 @@ private fun ConnectedSection(
         onMinRewardChange = onMinRewardChange,
         onApply = onApplyFeedback,
     )
+    BackgroundFeedbackCard(ui = ui, onOverlayWanted = onOverlayWanted)
     SessionDiagnostics(
         ui = ui,
         onManualFeedback = onManualFeedback,
@@ -469,6 +505,42 @@ private fun FeedbackSettingsCard(
 }
 
 @Composable
+private fun BackgroundFeedbackCard(
+    ui: MainUiState,
+    onOverlayWanted: (Boolean) -> Unit,
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Background feedback", fontWeight = FontWeight.Medium)
+            Text(
+                "Keep the live session on screen after you leave Callibri NFB.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text("Floating feedback")
+                Switch(
+                    checked = ui.overlayWanted && ui.overlayPermissionGranted,
+                    onCheckedChange = onOverlayWanted,
+                )
+            }
+            Text("Foreground service: ${if (ui.serviceRunning) "Running" else "Stopped"}")
+            Text("Overlay: ${if (ui.overlayVisible) "Visible" else "Hidden"}")
+            Text("Permission: ${if (ui.overlayPermissionGranted) "Granted" else "Required"}")
+            if (!ui.notificationPermissionGranted) {
+                Text(
+                    "Notification permission: Required. It is requested when you start EEG.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun SessionDiagnostics(
     ui: MainUiState,
     onManualFeedback: (Boolean) -> Unit,
@@ -510,6 +582,22 @@ private fun SessionDiagnostics(
             Text("Audio playing: ${if (ui.audioPlaying) "YES" else "NO"}")
             Text("Feedback updates per second: ${ui.feedbackUpdatesPerSecond}")
             Text("Live feedback: ${if (ui.liveFeedbackActive) "active" else "inactive"}")
+            Text("Activity: ${if (ui.activityInForeground) "foreground" else "background"}")
+            Text("Foreground service: ${if (ui.serviceRunning) "Running" else "Stopped"}")
+            Text("Overlay permission: ${if (ui.overlayPermissionGranted) "YES" else "NO"}")
+            Text("Overlay visible: ${if (ui.overlayVisible) "YES" else "NO"}")
+            Text("EEG stream active: ${if (ui.streaming) "YES" else "NO"}")
+            Text("Current smoothed reward: ${formatPercent(ui.rewardSmoothed, decimals = 1)}")
+            Text(
+                "Overlay-displayed reward: ${ui.overlayDisplayedReward?.let { formatPercent(it, decimals = 1) } ?: "—"}",
+            )
+            Text(
+                "Service elapsed: ${
+                    ui.serviceStartedAtElapsedMs?.let { started ->
+                        formatElapsed(SystemClock.elapsedRealtime() - started)
+                    } ?: "—"
+                }",
+            )
             SignalSourceLines(ui)
             Text("Elapsed EEG time: ${formatElapsed(ui.elapsedMillis)}")
             Text("Valid observations: ${ui.validObservations}")
