@@ -65,6 +65,7 @@ import com.callibri.nfb.callibri.SessionPhase
 import com.callibri.nfb.callibri.SignalIngress
 import com.callibri.nfb.protocol.FRE1Protocol
 import java.util.Locale
+import kotlin.math.floor
 import kotlin.math.roundToInt
 
 @Composable
@@ -576,11 +577,12 @@ private fun ExternalMediaCard(
                 "A black layer over other apps. The phone's brightness setting does not change. Poor reward is darker. Good reward is clear.",
                 style = MaterialTheme.typography.bodySmall,
             )
-            Text("Maximum dimming: ${(ui.maxDimAlpha * 100.0).roundToInt()}%")
+            Text("Maximum darkness: ${(ui.maxDimAlpha * 100.0).roundToInt()}%")
+            Text("10% — ${darknessCeilingPercent(ui.safeMaxDimAlpha)}%")
             Slider(
-                value = (ui.maxDimAlpha * 100.0).toFloat().coerceIn(10f, 60f),
+                value = (ui.maxDimAlpha * 100.0).toFloat().coerceIn(10f, darknessCeilingPercent(ui.safeMaxDimAlpha).toFloat()),
                 onValueChange = { onMaxDim(it.toDouble() / 100.0) },
-                valueRange = 10f..60f,
+                valueRange = 10f..darknessCeilingPercent(ui.safeMaxDimAlpha).toFloat(),
             )
             Text(
                 "Reward: ${ui.rewardSmoothed.roundToInt()}%",
@@ -593,6 +595,9 @@ private fun ExternalMediaCard(
         }
     }
 }
+
+private fun darknessCeilingPercent(safeMaxAlpha: Double): Int =
+    floor(safeMaxAlpha * 100.0).toInt().coerceIn(10, 80)
 
 private fun restoreLabel(restore: MediaRestore): String = when (restore) {
     MediaRestore.YES -> "YES"
@@ -758,6 +763,12 @@ private fun SessionDiagnostics(
             Text("Smoothed reward: ${formatPercent(ui.rewardSmoothed, decimals = 1)}")
             Text("Normalized feedback: ${"%.3f".format(java.util.Locale.US, ui.visualNormalized)}")
             Text("Maximum dim alpha: ${"%.2f".format(java.util.Locale.US, ui.maxDimAlpha)}")
+            Text("Safe maximum dim alpha: ${"%.2f".format(java.util.Locale.US, ui.safeMaxDimAlpha)}")
+            Text(
+                "System obscuring opacity: ${
+                    ui.systemObscuringOpacity?.let { "%.2f".format(java.util.Locale.US, it) } ?: "unavailable"
+                }",
+            )
             Text("Requested alpha: ${"%.3f".format(java.util.Locale.US, ui.visualRequestedAlpha)}")
             Text("Applied alpha: ${"%.3f".format(java.util.Locale.US, ui.visualAppliedAlpha)}")
             Text("Visual update rate: ${ui.visualUpdatesPerSecond}/sec")

@@ -18,6 +18,7 @@ import com.callibri.nfb.feedback.AudioFeedbackOutput
 import com.callibri.nfb.feedback.ExternalEngagement
 import com.callibri.nfb.feedback.FeedbackController
 import com.callibri.nfb.feedback.FeedbackModes
+import com.callibri.nfb.feedback.TouchObscuringLimit
 import com.callibri.nfb.feedback.VisualDimPreference
 import com.callibri.nfb.feedback.VisualDimming
 import com.callibri.nfb.feedback.FeedbackDestination
@@ -48,6 +49,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.Locale
 import kotlin.math.abs
 
 /**
@@ -69,9 +71,11 @@ class NeurofeedbackSession(private val app: Application) {
     private val mediaOutput = SystemMediaVolumeFeedbackOutput(mediaGate)
     private val outputs = SelectingFeedbackOutput(AudioFeedbackOutput(), mediaOutput)
     private val feedback = FeedbackController(outputs)
-    private val dimming = DimmingOverlay(app)
+    private val systemObscuringOpacity = TouchObscuringLimit.systemMaximum(app)
+    private val safeMaxAlpha = TouchObscuringLimit.safeMaximum(systemObscuringOpacity).toDouble()
+    private val dimming = DimmingOverlay(app, safeMaxAlpha.toFloat())
     private val visualPrefs = VisualDimPreference(app)
-    private var maxDimAlpha = visualPrefs.load()
+    private var maxDimAlpha = visualPrefs.load(safeMaxAlpha)
     private var audioEnabled = false
     private var visualEnabled = false
     private var visualEpoch = 0
@@ -88,10 +92,25 @@ class NeurofeedbackSession(private val app: Application) {
     private var latestElectrode: ElectrodeContact? = null
     private var linkWasConnected = false
 
-    private val _ui = MutableStateFlow(MainUiState(bands = initialBands(), maxDimAlpha = maxDimAlpha))
+    private val _ui = MutableStateFlow(
+        MainUiState(
+            bands = initialBands(),
+            maxDimAlpha = maxDimAlpha,
+            safeMaxDimAlpha = safeMaxAlpha,
+            systemObscuringOpacity = systemObscuringOpacity?.toDouble(),
+        ),
+    )
     val ui: StateFlow<MainUiState> = _ui.asStateFlow()
 
     init {
+        Log.i(
+            TAG,
+            "visual dim safe max %.3f (system obscuring %s)".format(
+                Locale.US,
+                safeMaxAlpha,
+                systemObscuringOpacity?.let { "%.3f".format(Locale.US, it) } ?: "unavailable",
+            ),
+        )
         dimming.onApplied = { alpha ->
             val attached = dimming.isAttached()
             _ui.update { state ->
@@ -355,9 +374,9 @@ class NeurofeedbackSession(private val app: Application) {
     }
 
     fun setMaxDimAlpha(alpha: Double) {
-        val clamped = VisualDimming.clampSetting(alpha)
+        val clamped = VisualDimming.clampSetting(alpha, safeMaxAlpha)
         maxDimAlpha = clamped
-        visualPrefs.save(clamped)
+        visualPrefs.save(clamped, safeMaxAlpha)
         _ui.update { it.copy(maxDimAlpha = clamped) }
         if (visualEnabled) {
             pushVisual(currentFeedbackPercent(), _ui.value.rewardReady, _ui.value.manualFeedback)

@@ -6,12 +6,13 @@ import android.content.Context
 class VisualDimPreference(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences(NAME, Context.MODE_PRIVATE)
 
-    fun load(): Double = VisualDimming.clampSetting(
+    fun load(safeMaximum: Double): Double = VisualDimming.clampSetting(
         prefs.getFloat(KEY, VisualDimming.DEFAULT_MAX_ALPHA.toFloat()).toDouble(),
+        safeMaximum,
     )
 
-    fun save(maxDimAlpha: Double) {
-        prefs.edit().putFloat(KEY, VisualDimming.clampSetting(maxDimAlpha).toFloat()).apply()
+    fun save(maxDimAlpha: Double, safeMaximum: Double) {
+        prefs.edit().putFloat(KEY, VisualDimming.clampSetting(maxDimAlpha, safeMaximum).toFloat()).apply()
     }
 
     private companion object {

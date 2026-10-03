@@ -1,5 +1,6 @@
 package com.callibri.nfb.feedback
 
+import android.view.WindowManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -7,12 +8,26 @@ import org.junit.Test
 
 class VisualDimmingTest {
     @Test
-    fun defaultMaxDimFollowsTheLinearMap() {
-        assertEquals(0.50, VisualDimming.alpha(20.0, 0.50), 1e-9)
-        assertEquals(0.375, VisualDimming.alpha(40.0, 0.50), 1e-9)
-        assertEquals(0.25, VisualDimming.alpha(60.0, 0.50), 1e-9)
-        assertEquals(0.125, VisualDimming.alpha(80.0, 0.50), 1e-9)
-        assertEquals(0.0, VisualDimming.alpha(100.0, 0.50), 1e-9)
+    fun defaultMaximumDarknessFollowsTheLinearMap() {
+        assertEquals(0.75, VisualDimming.DEFAULT_MAX_ALPHA, 0.0)
+        assertEquals(0.75, VisualDimming.alpha(20.0, 0.75), 1e-9)
+        assertEquals(0.5625, VisualDimming.alpha(40.0, 0.75), 1e-9)
+        assertEquals(0.375, VisualDimming.alpha(60.0, 0.75), 1e-9)
+        assertEquals(0.1875, VisualDimming.alpha(80.0, 0.75), 1e-9)
+        assertEquals(0.0, VisualDimming.alpha(100.0, 0.75), 1e-9)
+    }
+
+    @Test
+    fun deviceSafeMaximumStaysUnderTheObscuringLimit() {
+        assertEquals(0.78, TouchObscuringLimit.safeMaximum(0.80f), 0.0001)
+        assertEquals(0.78, TouchObscuringLimit.safeMaximum(null), 0.0)
+        assertEquals(0.78, TouchObscuringLimit.safeMaximum(Float.NaN), 0.0)
+        assertEquals(0.80, TouchObscuringLimit.safeMaximum(1.0f), 0.0001)
+        assertEquals(0.48, TouchObscuringLimit.safeMaximum(0.50f), 0.0001)
+        assertEquals(0.78, VisualDimming.clampSetting(0.90, 0.78), 1e-9)
+        assertEquals(0.75, VisualDimming.clampSetting(0.75, 0.78), 1e-9)
+        assertEquals(0.10, VisualDimming.clampSetting(0.01, 0.78), 1e-9)
+        assertEquals(0.10, VisualDimming.MIN_SETTING, 0.0)
     }
 
     @Test
@@ -28,10 +43,17 @@ class VisualDimmingTest {
         assertEquals(0.30, VisualDimming.alpha(20.0, 0.30), 1e-9)
         assertEquals(0.15, VisualDimming.alpha(60.0, 0.30), 1e-9)
         assertEquals(0.0, VisualDimming.alpha(100.0, 0.30), 1e-9)
-        assertEquals(0.60, VisualDimming.alpha(20.0, 0.60), 1e-9)
-        assertEquals(0.60, VisualDimming.clampSetting(1.0), 1e-9)
-        assertEquals(0.10, VisualDimming.clampSetting(0.01), 1e-9)
-        assertEquals(0.60, VisualDimming.alpha(20.0, 1.0), 1e-9)
+        assertEquals(0.75, VisualDimming.alpha(20.0, 0.75), 1e-9)
+        assertEquals(0.0, VisualDimming.alpha(100.0, 0.75), 1e-9)
+        assertEquals(0.80, VisualDimming.alpha(20.0, 1.0), 1e-9)
+    }
+
+    @Test
+    fun overlayFlagsLetTouchesThrough() {
+        assertEquals(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, DimmingWindowSpec.TYPE)
+        assertTrue((DimmingWindowSpec.FLAGS and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0)
+        assertTrue((DimmingWindowSpec.FLAGS and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) != 0)
+        assertTrue(DimmingWindowSpec.passesTouchesThrough())
     }
 
     @Test

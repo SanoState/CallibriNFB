@@ -15,7 +15,8 @@ import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
-import com.callibri.nfb.feedback.VisualDimming
+import com.callibri.nfb.feedback.DimmingWindowSpec
+import com.callibri.nfb.feedback.TouchObscuringLimit
 import kotlin.math.abs
 
 /**
@@ -26,7 +27,14 @@ import kotlin.math.abs
  * not take focus or touches. [WindowManager.LayoutParams.screenBrightness] stays
  * at [WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE].
  */
-class DimmingOverlay(private val context: Context) {
+class DimmingOverlay(
+    private val context: Context,
+    safeMaximumAlpha: Float = TouchObscuringLimit.FALLBACK_SAFE_MAX.toFloat(),
+) {
+    private val safeMaximum = safeMaximumAlpha.coerceIn(
+        0f,
+        TouchObscuringLimit.REQUESTED_CAP.toFloat(),
+    )
     private val windowManager = context.getSystemService(WindowManager::class.java)
     private val main = Handler(Looper.getMainLooper())
     private var view: View? = null
@@ -48,7 +56,7 @@ class DimmingOverlay(private val context: Context) {
     fun isAttached(): Boolean = view != null
 
     fun setTargetAlpha(alpha: Double) {
-        val target = alpha.toFloat().coerceIn(0f, VisualDimming.TOUCH_SAFE_CEILING.toFloat())
+        val target = alpha.toFloat().coerceIn(0f, safeMaximum)
         val token = epoch
         main.post {
             if (token != epoch) return@post
@@ -135,10 +143,8 @@ class DimmingOverlay(private val context: Context) {
         val layout = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            DimmingWindowSpec.TYPE,
+            DimmingWindowSpec.FLAGS,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -166,7 +172,7 @@ class DimmingOverlay(private val context: Context) {
         val layout = params ?: return
         val child = view ?: return
         val manager = windowManager ?: return
-        layout.alpha = alpha.coerceIn(0f, VisualDimming.TOUCH_SAFE_CEILING.toFloat())
+        layout.alpha = alpha.coerceIn(0f, safeMaximum)
         applied = layout.alpha
         try {
             manager.updateViewLayout(child, layout)
