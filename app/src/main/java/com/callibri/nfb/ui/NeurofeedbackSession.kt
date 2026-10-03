@@ -15,6 +15,7 @@ import com.callibri.nfb.callibri.ElectrodeContact
 import com.callibri.nfb.callibri.SessionPhase
 import com.callibri.nfb.feedback.AndroidMediaStream
 import com.callibri.nfb.feedback.AudioFeedbackOutput
+import com.callibri.nfb.feedback.ExternalEngagement
 import com.callibri.nfb.feedback.FeedbackController
 import com.callibri.nfb.feedback.FeedbackDestination
 import com.callibri.nfb.feedback.FeedbackSnapshot
@@ -266,6 +267,7 @@ class NeurofeedbackSession(private val app: Application) {
                 "Captured media step $captured as the loudest feedback level. Hardware volume buttons do not change this ceiling."
             },
         )
+        engageExternalIfNeeded()
     }
 
     fun startTestAudio() {
@@ -612,19 +614,27 @@ class NeurofeedbackSession(private val app: Application) {
     }
 
     private fun engageExternalIfNeeded() {
-        if (outputs.destination != FeedbackDestination.ExternalMedia) return
-        if (mediaGate.isFixed || mediaGate.capturedMaxIndex == null || mediaGate.isControlling) return
-        val manual = _ui.value.manualFeedback
-        val live = _ui.value.liveFeedbackActive &&
-            _ui.value.streaming &&
-            _ui.value.phase == SessionPhase.Connected
-        if (!manual && !live) return
-        mediaOutput.prepare(manual = manual, rewardReady = _ui.value.rewardReady)
+        val state = _ui.value
+        val manual = state.manualFeedback
+        val streaming = state.streaming && state.phase == SessionPhase.Connected
+        if (!ExternalEngagement.shouldStart(
+                externalSelected = outputs.destination == FeedbackDestination.ExternalMedia,
+                volumeFixed = mediaGate.isFixed,
+                hasCapturedMax = mediaGate.capturedMaxIndex != null,
+                alreadyControlling = mediaGate.isControlling,
+                manual = manual,
+                eegStreaming = streaming,
+            )
+        ) {
+            return
+        }
+        mediaOutput.prepare(manual = manual, rewardReady = state.rewardReady)
         publishFeedback(feedback.startAudio())
     }
 
     private fun publishSignal(snapshot: EegSnapshot, reward: RewardState, latestUv: Double?) {
         val active = _ui.value.phase == SessionPhase.Connected && _ui.value.streaming
+        if (active) engageExternalIfNeeded()
         mediaOutput.prepare(manual = _ui.value.manualFeedback, rewardReady = reward.rewardReady)
         val heard = feedback.setLiveReward(reward.smoothedPercent, SystemClock.elapsedRealtime(), active)
         _ui.update { state ->

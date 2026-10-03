@@ -8,6 +8,40 @@ import org.junit.Test
 
 class MediaVolumeTest {
     @Test
+    fun externalMediaStartsFromEegWithoutTheTestTone() {
+        assertTrue(
+            ExternalEngagement.shouldStart(
+                externalSelected = true,
+                volumeFixed = false,
+                hasCapturedMax = true,
+                alreadyControlling = false,
+                manual = false,
+                eegStreaming = true,
+            ),
+        )
+        assertFalse(
+            ExternalEngagement.shouldStart(
+                externalSelected = true,
+                volumeFixed = false,
+                hasCapturedMax = false,
+                alreadyControlling = false,
+                manual = false,
+                eegStreaming = true,
+            ),
+        )
+        assertFalse(
+            ExternalEngagement.shouldStart(
+                externalSelected = true,
+                volumeFixed = false,
+                hasCapturedMax = true,
+                alreadyControlling = false,
+                manual = false,
+                eegStreaming = false,
+            ),
+        )
+    }
+
+    @Test
     fun capturedMaximumOf10MapsTheRewardRange() {
         assertEquals(2, MediaVolumeMapping.desiredIndex(20.0, 10))
         assertEquals(6, MediaVolumeMapping.desiredIndex(60.0, 10))

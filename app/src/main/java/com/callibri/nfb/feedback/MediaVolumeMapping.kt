@@ -2,6 +2,22 @@ package com.callibri.nfb.feedback
 
 import kotlin.math.roundToInt
 
+object ExternalEngagement {
+    /** External media starts from the live EEG session or the manual slider. The test tone is not required. */
+    fun shouldStart(
+        externalSelected: Boolean,
+        volumeFixed: Boolean,
+        hasCapturedMax: Boolean,
+        alreadyControlling: Boolean,
+        manual: Boolean,
+        eegStreaming: Boolean,
+    ): Boolean = externalSelected &&
+        !volumeFixed &&
+        hasCapturedMax &&
+        !alreadyControlling &&
+        (manual || eegStreaming)
+}
+
 /**
  * Maps the existing smoothed reward onto a discrete STREAM_MUSIC index.
  *

@@ -528,7 +528,7 @@ private fun ExternalMediaCard(
                 Text("Set current volume as maximum")
             }
             Text(
-                "100% reward uses that captured step, not the phone's loudest step. Hardware volume buttons do not raise the ceiling. While feedback is on, the next update moves the stream back to the calculated step.",
+                "100% reward uses that captured step, not the phone's loudest step. You do not need the test tone. Feedback starts when EEG is running, or when the manual slider is on. Hardware volume buttons do not raise the ceiling.",
                 style = MaterialTheme.typography.bodySmall,
             )
             ui.mediaNote?.let { note ->
