@@ -200,6 +200,9 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         onSelectBuiltIn = viewModel::selectBuiltInFeedback,
                         onSelectExternal = viewModel::selectExternalFeedback,
                         onCaptureMediaMax = viewModel::captureMediaMaximum,
+                        onAudioFeedback = viewModel::setAudioFeedbackEnabled,
+                        onVisualFeedback = viewModel::setVisualFeedbackEnabled,
+                        onMaxDim = viewModel::setMaxDimAlpha,
                     )
                 }
             }
@@ -313,6 +316,9 @@ private fun ConnectedSection(
     onSelectBuiltIn: () -> Unit,
     onSelectExternal: () -> Unit,
     onCaptureMediaMax: () -> Unit,
+    onAudioFeedback: (Boolean) -> Unit,
+    onVisualFeedback: (Boolean) -> Unit,
+    onMaxDim: (Double) -> Unit,
 ) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -343,6 +349,9 @@ private fun ConnectedSection(
         onSelectBuiltIn = onSelectBuiltIn,
         onSelectExternal = onSelectExternal,
         onCaptureMediaMax = onCaptureMediaMax,
+        onAudioFeedback = onAudioFeedback,
+        onVisualFeedback = onVisualFeedback,
+        onMaxDim = onMaxDim,
     )
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -492,13 +501,34 @@ private fun ExternalMediaCard(
     onSelectBuiltIn: () -> Unit,
     onSelectExternal: () -> Unit,
     onCaptureMediaMax: () -> Unit,
+    onAudioFeedback: (Boolean) -> Unit,
+    onVisualFeedback: (Boolean) -> Unit,
+    onMaxDim: (Double) -> Unit,
 ) {
     val external = ui.feedbackDestination == FeedbackDestination.ExternalMedia
+    val audioLevel = when {
+        !ui.audioFeedbackEnabled -> "off"
+        external && ui.mediaLevelPercent != null -> "${ui.mediaLevelPercent}%"
+        else -> "${ui.feedbackVolumePercent.roundToInt()}%"
+    }
+    val dimPercent = if (ui.visualFeedbackEnabled) (ui.visualRequestedAlpha * 100.0).roundToInt() else 0
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("External media feedback", fontWeight = FontWeight.Medium)
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Feedback output", fontWeight = FontWeight.Medium)
             Text(
-                "Uses Android media volume. This affects media audio on the device while feedback is active.",
+                "Audio and visual use the same smoothed reward. Either one can be on by itself.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text("Audio feedback")
+                Switch(checked = ui.audioFeedbackEnabled, onCheckedChange = onAudioFeedback)
+            }
+            Text(
+                "Audio uses the output selected below. Poor reward is quieter. Good reward is louder.",
                 style = MaterialTheme.typography.bodySmall,
             )
             if (ui.mediaFixed) {
@@ -528,10 +558,36 @@ private fun ExternalMediaCard(
                 Text("Set current volume as maximum")
             }
             Text(
-                "100% reward uses that captured step, not the phone's loudest step. You do not need the test tone. Feedback starts when EEG is running, or when the manual slider is on. Hardware volume buttons do not raise the ceiling.",
+                "100% reward uses that captured step, not the phone's loudest step. Hardware volume buttons do not raise the ceiling.",
                 style = MaterialTheme.typography.bodySmall,
             )
             ui.mediaNote?.let { note ->
+                Text(note, style = MaterialTheme.typography.bodySmall)
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text("Visual feedback")
+                Switch(checked = ui.visualFeedbackEnabled, onCheckedChange = onVisualFeedback)
+            }
+            Text(
+                "A black layer over other apps. The phone's brightness setting does not change. Poor reward is darker. Good reward is clear.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text("Maximum dimming: ${(ui.maxDimAlpha * 100.0).roundToInt()}%")
+            Slider(
+                value = (ui.maxDimAlpha * 100.0).toFloat().coerceIn(10f, 60f),
+                onValueChange = { onMaxDim(it.toDouble() / 100.0) },
+                valueRange = 10f..60f,
+            )
+            Text(
+                "Reward: ${ui.rewardSmoothed.roundToInt()}%",
+            )
+            Text("Audio level: $audioLevel")
+            Text("Visual dimming: $dimPercent%")
+            ui.visualNote?.let { note ->
                 Text(note, style = MaterialTheme.typography.bodySmall)
             }
         }
@@ -657,7 +713,7 @@ private fun SessionDiagnostics(
                     steps = 79,
                 )
                 Text(
-                    "20% is quiet, 100% is full. The tone's pitch does not change.",
+                    "20% is quiet and darkest, 100% is full and clear. The tone's pitch does not change. With Manual test on, this slider drives every feedback output that is enabled.",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -686,7 +742,26 @@ private fun SessionDiagnostics(
                 }",
             )
             SignalSourceLines(ui)
+            Text("Audio feedback enabled: ${if (ui.audioFeedbackEnabled) "YES" else "NO"}")
+            Text(
+                "Audio output type: ${
+                    when {
+                        !ui.audioFeedbackEnabled -> "None"
+                        ui.feedbackDestination == FeedbackDestination.ExternalMedia -> "External media"
+                        else -> "Built-in"
+                    }
+                }",
+            )
             Text("External media output: ${if (ui.feedbackDestination == FeedbackDestination.ExternalMedia) "ENABLED" else "DISABLED"}")
+            Text("Visual feedback enabled: ${if (ui.visualFeedbackEnabled) "YES" else "NO"}")
+            Text("Overlay active: ${if (ui.visualOverlayActive) "YES" else "NO"}")
+            Text("Smoothed reward: ${formatPercent(ui.rewardSmoothed, decimals = 1)}")
+            Text("Normalized feedback: ${"%.3f".format(java.util.Locale.US, ui.visualNormalized)}")
+            Text("Maximum dim alpha: ${"%.2f".format(java.util.Locale.US, ui.maxDimAlpha)}")
+            Text("Requested alpha: ${"%.3f".format(java.util.Locale.US, ui.visualRequestedAlpha)}")
+            Text("Applied alpha: ${"%.3f".format(java.util.Locale.US, ui.visualAppliedAlpha)}")
+            Text("Visual update rate: ${ui.visualUpdatesPerSecond}/sec")
+            Text("Current visual alpha: ${"%.3f".format(java.util.Locale.US, ui.visualAppliedAlpha)}")
             Text("STREAM_MUSIC current index: ${ui.mediaCurrentIndex}")
             Text("Maximum device index: ${ui.mediaDeviceMaxIndex}")
             Text("Captured feedback maximum: ${ui.mediaCapturedMaxIndex?.toString() ?: "—"}")

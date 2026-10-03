@@ -106,6 +106,15 @@ data class MainUiState(
     val mediaCurrentPercent: Int = 0,
     val mediaLevelPercent: Int? = null,
     val mediaNote: String? = null,
+    val audioFeedbackEnabled: Boolean = false,
+    val visualFeedbackEnabled: Boolean = false,
+    val maxDimAlpha: Double = 0.50,
+    val visualNormalized: Double = 0.0,
+    val visualRequestedAlpha: Double = 0.0,
+    val visualAppliedAlpha: Double = 0.0,
+    val visualOverlayActive: Boolean = false,
+    val visualUpdatesPerSecond: Int = 0,
+    val visualNote: String? = null,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -153,6 +162,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun selectExternalFeedback() = session.selectExternalFeedback()
 
     fun captureMediaMaximum() = session.captureMediaMaximum()
+
+    fun setAudioFeedbackEnabled(enabled: Boolean) = session.setAudioFeedbackEnabled(enabled)
+
+    fun setVisualFeedbackEnabled(enabled: Boolean) = session.setVisualFeedbackEnabled(enabled)
+
+    fun setMaxDimAlpha(alpha: Double) = session.setMaxDimAlpha(alpha)
 
     fun updateLow(id: String, text: String) = session.updateLow(id, text)
 

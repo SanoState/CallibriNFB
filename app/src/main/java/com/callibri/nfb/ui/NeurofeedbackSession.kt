@@ -17,6 +17,9 @@ import com.callibri.nfb.feedback.AndroidMediaStream
 import com.callibri.nfb.feedback.AudioFeedbackOutput
 import com.callibri.nfb.feedback.ExternalEngagement
 import com.callibri.nfb.feedback.FeedbackController
+import com.callibri.nfb.feedback.FeedbackModes
+import com.callibri.nfb.feedback.VisualDimPreference
+import com.callibri.nfb.feedback.VisualDimming
 import com.callibri.nfb.feedback.FeedbackDestination
 import com.callibri.nfb.feedback.FeedbackSnapshot
 import com.callibri.nfb.feedback.MediaVolumeGate
@@ -26,6 +29,7 @@ import com.callibri.nfb.feedback.RewardPipeline
 import com.callibri.nfb.feedback.RewardState
 import com.callibri.nfb.protocol.FRE1Protocol
 import com.callibri.nfb.protocol.FrequencyBand
+import com.callibri.nfb.session.DimmingOverlay
 import com.callibri.nfb.session.NeurofeedbackSessionService
 import com.callibri.nfb.session.SessionLifetime
 import com.callibri.nfb.session.SessionPolicy
@@ -44,6 +48,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlin.math.abs
 
 /**
  * The one live Callibri session for this process.
@@ -64,6 +69,15 @@ class NeurofeedbackSession(private val app: Application) {
     private val mediaOutput = SystemMediaVolumeFeedbackOutput(mediaGate)
     private val outputs = SelectingFeedbackOutput(AudioFeedbackOutput(), mediaOutput)
     private val feedback = FeedbackController(outputs)
+    private val dimming = DimmingOverlay(app)
+    private val visualPrefs = VisualDimPreference(app)
+    private var maxDimAlpha = visualPrefs.load()
+    private var audioEnabled = false
+    private var visualEnabled = false
+    private var visualEpoch = 0
+    private var liveVisualOpen = true
+    private var lastVisualCommand = Double.NaN
+    private val visualUpdateTimes = ArrayDeque<Long>()
     private val signalMutex = Mutex()
     private var liveDriveActive = false
     private var processingSession = Long.MIN_VALUE
@@ -74,8 +88,26 @@ class NeurofeedbackSession(private val app: Application) {
     private var latestElectrode: ElectrodeContact? = null
     private var linkWasConnected = false
 
-    private val _ui = MutableStateFlow(MainUiState(bands = initialBands()))
+    private val _ui = MutableStateFlow(MainUiState(bands = initialBands(), maxDimAlpha = maxDimAlpha))
     val ui: StateFlow<MainUiState> = _ui.asStateFlow()
+
+    init {
+        dimming.onApplied = { alpha ->
+            val attached = dimming.isAttached()
+            _ui.update { state ->
+                state.copy(
+                    visualAppliedAlpha = alpha,
+                    visualOverlayActive = attached,
+                    visualNote = if (attached) null else state.visualNote,
+                )
+            }
+        }
+        dimming.onUnavailable = { note ->
+            _ui.update { state ->
+                if (state.visualNote == note) state else state.copy(visualNote = note, visualOverlayActive = false)
+            }
+        }
+    }
 
     private val manager = CallibriManager(
         context = app.applicationContext,
@@ -192,6 +224,7 @@ class NeurofeedbackSession(private val app: Application) {
 
     fun startEeg() {
         if (!SessionPolicy.shouldStartForegroundService(explicitEegStart = true)) return
+        liveVisualOpen = true
         lifetime.arm()
         _ui.update {
             it.copy(
@@ -219,16 +252,24 @@ class NeurofeedbackSession(private val app: Application) {
     }
 
     fun stopEeg() {
+        liveVisualOpen = false
+        visualEpoch++
         lifetime.disarm()
         releaseExternalVolume()
+        clearVisualOverlay()
         manager.stopEeg()
     }
 
     fun selectBuiltInFeedback() {
         if (outputs.destination == FeedbackDestination.BuiltIn) return
+        val keepAudio = audioEnabled
         releaseExternalVolume()
         outputs.select(FeedbackDestination.BuiltIn)
-        publishMedia()
+        if (keepAudio) {
+            publishFeedback(feedback.startAudio())
+        } else {
+            publishMedia()
+        }
     }
 
     fun selectExternalFeedback() {
@@ -241,6 +282,7 @@ class NeurofeedbackSession(private val app: Application) {
         }
         if (outputs.destination == FeedbackDestination.ExternalMedia) return
         if (_ui.value.audioPlaying) publishFeedback(feedback.stopAudio())
+        audioEnabled = true
         outputs.select(FeedbackDestination.ExternalMedia)
         publishMedia(note = if (mediaGate.capturedMaxIndex == null) {
             "Set the current volume as the maximum before feedback can move it."
@@ -271,12 +313,60 @@ class NeurofeedbackSession(private val app: Application) {
     }
 
     fun startTestAudio() {
+        if (outputs.destination != FeedbackDestination.BuiltIn) return
+        audioEnabled = true
         publishFeedback(feedback.startAudio())
     }
 
     fun stopTestAudio() {
+        if (outputs.destination == FeedbackDestination.BuiltIn) audioEnabled = false
         publishFeedback(feedback.stopAudio())
     }
+
+    fun setAudioFeedbackEnabled(enabled: Boolean) {
+        audioEnabled = enabled
+        if (!enabled) {
+            if (outputs.destination == FeedbackDestination.ExternalMedia) {
+                releaseExternalVolume()
+            } else {
+                publishFeedback(feedback.stopAudio())
+            }
+            _ui.update { it.copy(audioFeedbackEnabled = false) }
+            return
+        }
+        if (outputs.destination == FeedbackDestination.ExternalMedia) {
+            _ui.update { it.copy(audioFeedbackEnabled = true) }
+            engageExternalIfNeeded()
+        } else {
+            publishFeedback(feedback.startAudio())
+        }
+    }
+
+    fun setVisualFeedbackEnabled(enabled: Boolean) {
+        visualEnabled = enabled
+        if (!enabled) {
+            visualEpoch++
+            clearVisualOverlay()
+            _ui.update { it.copy(visualFeedbackEnabled = false, visualNote = null) }
+            return
+        }
+        _ui.update { it.copy(visualFeedbackEnabled = true, visualNote = null) }
+        pushVisual(currentFeedbackPercent(), _ui.value.rewardReady, _ui.value.manualFeedback)
+    }
+
+    fun setMaxDimAlpha(alpha: Double) {
+        val clamped = VisualDimming.clampSetting(alpha)
+        maxDimAlpha = clamped
+        visualPrefs.save(clamped)
+        _ui.update { it.copy(maxDimAlpha = clamped) }
+        if (visualEnabled) {
+            pushVisual(currentFeedbackPercent(), _ui.value.rewardReady, _ui.value.manualFeedback)
+        }
+    }
+
+    fun dimmingGeneration(): Int = dimming.generation
+
+    fun dimmingAttached(): Boolean = dimming.isAttached()
 
     fun setManualFeedback(enabled: Boolean) {
         if (enabled) {
@@ -284,7 +374,8 @@ class NeurofeedbackSession(private val app: Application) {
         }
         mediaOutput.prepare(manual = enabled, rewardReady = _ui.value.rewardReady)
         publishFeedback(feedback.setManualEnabled(enabled))
-        if (enabled) engageExternalIfNeeded()
+        if (enabled && audioEnabled) engageExternalIfNeeded()
+        pushVisual(currentFeedbackPercent(), _ui.value.rewardReady, enabled)
     }
 
     fun setManualFeedbackPercent(percent: Double) {
@@ -293,16 +384,20 @@ class NeurofeedbackSession(private val app: Application) {
         val arm = outputs.destination == FeedbackDestination.ExternalMedia &&
             _ui.value.manualFeedback &&
             !mediaGate.isControlling
-        if (arm) {
+        if (arm && audioEnabled) {
             engageExternalIfNeeded()
             if (!mediaGate.isControlling) publishFeedback(updated)
         } else {
             publishFeedback(updated)
         }
+        pushVisual(percent, rewardReady = true, manual = true)
     }
 
     fun disconnect() {
+        liveVisualOpen = false
+        visualEpoch++
         lifetime.disarm()
+        clearVisualOverlay()
         manager.disconnect()
     }
 
@@ -557,7 +652,10 @@ class NeurofeedbackSession(private val app: Application) {
         val connected = link.phase == SessionPhase.Connected
         latestElectrode = if (connected) link.electrode else null
         if (linkWasConnected && !connected) {
+            liveVisualOpen = false
+            visualEpoch++
             lifetime.disarm()
+            clearVisualOverlay()
             scope.launch(Dispatchers.Default) {
                 signalMutex.withLock { pipeline.resetSession() }
             }
@@ -600,11 +698,18 @@ class NeurofeedbackSession(private val app: Application) {
     }
 
     private fun publishFeedback(snapshot: FeedbackSnapshot) {
-        _ui.update { it.withFeedback(snapshot).withMedia(mediaGate.status(snapshot.requestedPercent), outputs.destination) }
+        _ui.update {
+            it.withFeedback(snapshot)
+                .copy(audioFeedbackEnabled = audioEnabled)
+                .withMedia(mediaGate.status(snapshot.requestedPercent), outputs.destination)
+        }
     }
 
     private fun publishMedia(note: String? = _ui.value.mediaNote) {
-        _ui.update { it.copy(mediaNote = note).withMedia(mediaGate.status(it.feedbackVolumePercent), outputs.destination) }
+        _ui.update {
+            it.copy(mediaNote = note, audioFeedbackEnabled = audioEnabled)
+                .withMedia(mediaGate.status(it.feedbackVolumePercent), outputs.destination)
+        }
     }
 
     private fun releaseExternalVolume() {
@@ -614,6 +719,7 @@ class NeurofeedbackSession(private val app: Application) {
     }
 
     private fun engageExternalIfNeeded() {
+        if (!audioEnabled) return
         val state = _ui.value
         val manual = state.manualFeedback
         val streaming = state.streaming && state.phase == SessionPhase.Connected
@@ -634,16 +740,19 @@ class NeurofeedbackSession(private val app: Application) {
 
     private fun publishSignal(snapshot: EegSnapshot, reward: RewardState, latestUv: Double?) {
         val active = _ui.value.phase == SessionPhase.Connected && _ui.value.streaming
-        if (active) engageExternalIfNeeded()
+        if (active && audioEnabled) engageExternalIfNeeded()
         mediaOutput.prepare(manual = _ui.value.manualFeedback, rewardReady = reward.rewardReady)
         val heard = feedback.setLiveReward(reward.smoothedPercent, SystemClock.elapsedRealtime(), active)
+        val manual = _ui.value.manualFeedback
         _ui.update { state ->
             if (state.phase != SessionPhase.Connected) return@update state
             state.withReward(reward).withFeedback(heard).copy(
                 latestRawUv = latestUv ?: snapshot.latestRawMicrovolts,
                 waveform = snapshot.waveform,
+                audioFeedbackEnabled = audioEnabled,
             ).withMedia(mediaGate.status(heard.requestedPercent), outputs.destination)
         }
+        if (!manual) pushVisual(reward.smoothedPercent, reward.rewardReady, manual = false, liveSample = true)
     }
 
     private fun publishIncoming(latestUv: Double) {
@@ -655,6 +764,7 @@ class NeurofeedbackSession(private val app: Application) {
     private fun publishReward(reward: RewardState) {
         val active = _ui.value.phase == SessionPhase.Connected && _ui.value.streaming
         mediaOutput.prepare(manual = _ui.value.manualFeedback, rewardReady = reward.rewardReady)
+        val manual = _ui.value.manualFeedback
         val heard = feedback.setLiveReward(reward.smoothedPercent, SystemClock.elapsedRealtime(), active)
         _ui.update { state ->
             val next = if (state.phase != SessionPhase.Connected) {
@@ -662,8 +772,10 @@ class NeurofeedbackSession(private val app: Application) {
             } else {
                 state.withReward(reward).withFeedback(heard)
             }
-            next.withMedia(mediaGate.status(heard.requestedPercent), outputs.destination)
+            next.copy(audioFeedbackEnabled = audioEnabled)
+                .withMedia(mediaGate.status(heard.requestedPercent), outputs.destination)
         }
+        if (!manual) pushVisual(reward.smoothedPercent, reward.rewardReady, manual = false, liveSample = true)
     }
 
     private fun currentBands(): List<FrequencyBand> =
@@ -675,6 +787,79 @@ class NeurofeedbackSession(private val app: Application) {
             app,
             Manifest.permission.POST_NOTIFICATIONS,
         ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun currentFeedbackPercent(): Double {
+        val state = _ui.value
+        return if (state.manualFeedback) state.feedbackVolumePercent else state.rewardSmoothed
+    }
+
+    private fun pushVisual(
+        percent: Double,
+        rewardReady: Boolean,
+        manual: Boolean,
+        liveSample: Boolean = false,
+    ) {
+        if (liveSample && !liveVisualOpen) return
+        val epoch = visualEpoch
+        val state = _ui.value
+        val live = state.streaming && state.phase == SessionPhase.Connected
+        if (!visualEnabled || (!manual && !live)) {
+            if (epoch == visualEpoch && (state.visualOverlayActive || dimming.isAttached())) {
+                clearVisualOverlay()
+            }
+            return
+        }
+        if (epoch != visualEpoch) return
+        val alpha = FeedbackModes.visualAlpha(
+            visualEnabled = true,
+            manual = manual,
+            rewardReady = rewardReady,
+            rewardPercent = percent,
+            maxDimAlpha = maxDimAlpha,
+        )
+        val normalized = if (manual || rewardReady) VisualDimming.normalized(percent) else 0.0
+        noteVisualUpdate(alpha)
+        dimming.setTargetAlpha(alpha)
+        if (epoch != visualEpoch) {
+            dimming.hide()
+            return
+        }
+        _ui.update { current ->
+            if (epoch != visualEpoch) return@update current
+            current.copy(
+                visualFeedbackEnabled = true,
+                visualNormalized = normalized,
+                visualRequestedAlpha = alpha,
+                visualUpdatesPerSecond = visualUpdateTimes.size,
+                maxDimAlpha = maxDimAlpha,
+            )
+        }
+    }
+
+    private fun clearVisualOverlay() {
+        lastVisualCommand = Double.NaN
+        visualUpdateTimes.clear()
+        dimming.hide()
+        _ui.update {
+            it.copy(
+                visualOverlayActive = false,
+                visualRequestedAlpha = 0.0,
+                visualAppliedAlpha = 0.0,
+                visualNormalized = 0.0,
+                visualUpdatesPerSecond = 0,
+            )
+        }
+    }
+
+    private fun noteVisualUpdate(alpha: Double) {
+        if (!lastVisualCommand.isNaN() && abs(alpha - lastVisualCommand) < 0.005) return
+        lastVisualCommand = alpha
+        val now = SystemClock.elapsedRealtime()
+        visualUpdateTimes.addLast(now)
+        while (visualUpdateTimes.isNotEmpty() && now - visualUpdateTimes.first() > 1_000L) {
+            visualUpdateTimes.removeFirst()
+        }
     }
 
     private fun logProcessingError(error: Exception) {

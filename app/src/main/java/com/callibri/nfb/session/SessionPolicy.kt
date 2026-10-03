@@ -99,6 +99,9 @@ data class OverlayModel(
     val displayedReward: Double?,
     val mediaOn: Boolean = false,
     val mediaLevelLabel: String = "—",
+    val audioOn: Boolean = false,
+    val visualOn: Boolean = false,
+    val visualDimLabel: String = "—",
 )
 
 object SessionPolicy {
@@ -177,6 +180,9 @@ object SessionPolicy {
         manualOverride: Boolean,
         mediaOn: Boolean = false,
         mediaLevelPercent: Int? = null,
+        audioOn: Boolean = false,
+        visualOn: Boolean = false,
+        visualDimPercent: Int? = null,
     ): OverlayModel {
         val shown = overlayReward(connected, streaming, smoothedReward)
         val collapsed = if (shown == null) "—" else "${shown.roundToInt().coerceIn(0, 100)}%"
@@ -191,6 +197,9 @@ object SessionPolicy {
             manualOverride = manualOverride,
             mediaOn = mediaOn,
             mediaLevelLabel = mediaLevelPercent?.let { "$it%" } ?: "—",
+            audioOn = audioOn,
+            visualOn = visualOn,
+            visualDimLabel = visualDimPercent?.let { "$it%" } ?: "—",
             dotArgb = when {
                 connected && streaming -> 0xFF3DDC97.toInt()
                 connected -> 0xFFE0B15A.toInt()

@@ -24,6 +24,8 @@ class FeedbackOverlay(
     private val onStop: () -> Unit,
     private val onOpenApp: () -> Unit,
     private val onToggleMedia: () -> Unit = {},
+    private val onToggleAudio: () -> Unit = {},
+    private val onToggleVisual: () -> Unit = {},
 ) {
     private val windowManager = context.getSystemService(WindowManager::class.java)
     private val density = context.resources.displayMetrics.density
@@ -41,6 +43,11 @@ class FeedbackOverlay(
     private var mediaStateView: TextView? = null
     private var mediaLevelView: TextView? = null
     private var mediaToggle: TextView? = null
+    private var audioStateView: TextView? = null
+    private var visualStateView: TextView? = null
+    private var visualDimView: TextView? = null
+    private var audioToggle: TextView? = null
+    private var visualToggle: TextView? = null
     private var manualView: TextView? = null
     private var expanded = false
     private var posX = dp(12)
@@ -58,6 +65,19 @@ class FeedbackOverlay(
         root = null
         params = null
         expandedPanel = null
+    }
+
+    /** Puts this window above the full-screen dim layer after that layer is added. */
+    fun bringToFront() {
+        val view = root ?: return
+        val layout = params ?: return
+        val manager = windowManager ?: return
+        try {
+            if (view.isAttachedToWindow) manager.removeView(view)
+            manager.addView(view, layout)
+        } catch (error: Exception) {
+            Log.w(TAG, "overlay raise failed", error)
+        }
     }
 
     fun render(model: OverlayModel): Boolean {
@@ -85,7 +105,12 @@ class FeedbackOverlay(
         volumeView?.text = "Feedback volume: ${model.volumeLabel}"
         mediaStateView?.text = "Media feedback: ${if (model.mediaOn) "ON" else "OFF"}"
         mediaLevelView?.text = "Media level: ${model.mediaLevelLabel}"
+        audioStateView?.text = "Audio feedback: ${if (model.audioOn) "ON" else "OFF"}"
+        visualStateView?.text = "Visual feedback: ${if (model.visualOn) "ON" else "OFF"}"
+        visualDimView?.text = "Visual dimming: ${model.visualDimLabel}"
         mediaToggle?.text = if (model.mediaOn) "Media feedback off" else "Media feedback on"
+        audioToggle?.text = if (model.audioOn) "Audio off" else "Audio on"
+        visualToggle?.text = if (model.visualOn) "Visual off" else "Visual on"
         elapsedView?.text = "Elapsed: ${model.elapsedLabel}"
         val electrode = model.electrodeLabel
         electrodeView?.text = if (electrode.isNullOrBlank()) "Electrodes: —" else "Electrodes: $electrode"
@@ -143,6 +168,15 @@ class FeedbackOverlay(
         val mediaButton = chip("Media feedback on").apply {
             setOnClickListener { onToggleMedia() }
         }
+        val audioLine = line()
+        val visualLine = line()
+        val dimLine = line()
+        val audioButton = chip("Audio on").apply {
+            setOnClickListener { onToggleAudio() }
+        }
+        val visualButton = chip("Visual on").apply {
+            setOnClickListener { onToggleVisual() }
+        }
         val manual = line().apply {
             text = "Manual test is overriding the reward."
             visibility = View.GONE
@@ -162,6 +196,11 @@ class FeedbackOverlay(
         details.addView(volume)
         details.addView(mediaState)
         details.addView(mediaLevel)
+        details.addView(audioLine)
+        details.addView(visualLine)
+        details.addView(dimLine)
+        details.addView(audioButton.paddedTop())
+        details.addView(visualButton.paddedTop())
         details.addView(mediaButton.paddedTop())
         details.addView(elapsed)
         details.addView(electrode)
@@ -199,6 +238,11 @@ class FeedbackOverlay(
         mediaStateView = mediaState
         mediaLevelView = mediaLevel
         mediaToggle = mediaButton
+        audioStateView = audioLine
+        visualStateView = visualLine
+        visualDimView = dimLine
+        audioToggle = audioButton
+        visualToggle = visualButton
         elapsedView = elapsed
         electrodeView = electrode
         manualView = manual

@@ -27,6 +27,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.FlowPreview
+import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
 
@@ -42,6 +43,7 @@ class NeurofeedbackSessionService : Service() {
     private var retired = false
     private var generation = 0
     private var lastNotificationKey: String? = null
+    private var raisedDimmingGeneration = -1
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -169,16 +171,33 @@ class NeurofeedbackSessionService : Service() {
             elapsedMillis = state.elapsedMillis,
             electrode = electrodeLabel(state.electrode),
             manualOverride = state.manualFeedback,
-            mediaOn = state.feedbackDestination == com.callibri.nfb.feedback.FeedbackDestination.ExternalMedia,
+            mediaOn = state.feedbackDestination == com.callibri.nfb.feedback.FeedbackDestination.ExternalMedia &&
+                state.audioFeedbackEnabled,
             mediaLevelPercent = state.mediaLevelPercent,
+            audioOn = state.audioFeedbackEnabled,
+            visualOn = state.visualFeedbackEnabled,
+            visualDimPercent = if (state.visualOverlayActive) {
+                (state.visualRequestedAlpha * 100.0).roundToInt()
+            } else {
+                0
+            },
         )
         val panel = overlay ?: FeedbackOverlay(
             context = applicationContext,
             onStop = { session.stopEeg() },
             onOpenApp = { openApp() },
             onToggleMedia = { session.toggleExternalMedia() },
+            onToggleAudio = { session.setAudioFeedbackEnabled(!session.ui.value.audioFeedbackEnabled) },
+            onToggleVisual = { session.setVisualFeedbackEnabled(!session.ui.value.visualFeedbackEnabled) },
         ).also { overlay = it }
         val shown = panel.render(model)
+        if (shown && session.dimmingAttached()) {
+            val generation = session.dimmingGeneration()
+            if (generation != raisedDimmingGeneration) {
+                panel.bringToFront()
+                raisedDimmingGeneration = generation
+            }
+        }
         if (!shown) session.noteOverlayPermissionDenied()
         session.noteOverlayPaint(
             visible = shown && panel.isAttached(),
