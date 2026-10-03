@@ -31,6 +31,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
@@ -49,6 +50,9 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.callibri.nfb.feedback.FeedbackDestination
+import com.callibri.nfb.feedback.MediaRestore
+import com.callibri.nfb.feedback.VolumeMapping
 import com.callibri.nfb.protocol.BandGoal
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -193,6 +197,9 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         onStopAudio = viewModel::stopTestAudio,
                         onManualFeedback = viewModel::setManualFeedback,
                         onManualPercent = viewModel::setManualFeedbackPercent,
+                        onSelectBuiltIn = viewModel::selectBuiltInFeedback,
+                        onSelectExternal = viewModel::selectExternalFeedback,
+                        onCaptureMediaMax = viewModel::captureMediaMaximum,
                     )
                 }
             }
@@ -303,6 +310,9 @@ private fun ConnectedSection(
     onManualFeedback: (Boolean) -> Unit,
     onManualPercent: (Double) -> Unit,
     onOverlayWanted: (Boolean) -> Unit,
+    onSelectBuiltIn: () -> Unit,
+    onSelectExternal: () -> Unit,
+    onCaptureMediaMax: () -> Unit,
 ) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -328,6 +338,12 @@ private fun ConnectedSection(
     }
     Text("FRE1", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
     RewardCard(ui, onStartAudio = onStartAudio, onStopAudio = onStopAudio)
+    ExternalMediaCard(
+        ui = ui,
+        onSelectBuiltIn = onSelectBuiltIn,
+        onSelectExternal = onSelectExternal,
+        onCaptureMediaMax = onCaptureMediaMax,
+    )
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -441,20 +457,91 @@ private fun RewardCard(
                 )
             }
             Text(
-                "Volume changes only this app's test tone. The phone's media volume stays where you set it.",
+                if (ui.feedbackDestination == FeedbackDestination.ExternalMedia) {
+                    "External media is the selected output, so the test tone stays off."
+                } else {
+                    "Volume changes only this app's test tone. The phone's media volume stays where you set it."
+                },
                 style = MaterialTheme.typography.bodySmall,
             )
             ui.audioFailure?.let { failure ->
                 Text(failure, color = MaterialTheme.colorScheme.error)
             }
-            Button(onClick = onStartAudio, modifier = Modifier.fillMaxWidth(), enabled = !ui.audioPlaying) {
+            val builtIn = ui.feedbackDestination == FeedbackDestination.BuiltIn
+            Button(
+                onClick = onStartAudio,
+                modifier = Modifier.fillMaxWidth(),
+                enabled = builtIn && !ui.audioPlaying,
+            ) {
                 Text("Start Test Audio")
             }
-            OutlinedButton(onClick = onStopAudio, modifier = Modifier.fillMaxWidth(), enabled = ui.audioPlaying) {
+            OutlinedButton(
+                onClick = onStopAudio,
+                modifier = Modifier.fillMaxWidth(),
+                enabled = builtIn && ui.audioPlaying,
+            ) {
                 Text("Stop Test Audio")
             }
         }
     }
+}
+
+@Composable
+private fun ExternalMediaCard(
+    ui: MainUiState,
+    onSelectBuiltIn: () -> Unit,
+    onSelectExternal: () -> Unit,
+    onCaptureMediaMax: () -> Unit,
+) {
+    val external = ui.feedbackDestination == FeedbackDestination.ExternalMedia
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("External media feedback", fontWeight = FontWeight.Medium)
+            Text(
+                "Uses Android media volume. This affects media audio on the device while feedback is active.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (ui.mediaFixed) {
+                Text("External media feedback unavailable on this device.")
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(selected = !external, onClick = onSelectBuiltIn)
+                Text("Built-in test audio")
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(
+                    selected = external,
+                    onClick = onSelectExternal,
+                    enabled = !ui.mediaFixed,
+                )
+                Text("External media")
+            }
+            Text("Current media volume: ${ui.mediaCurrentPercent}%")
+            Text(
+                "Captured maximum: ${ui.mediaCapturedMaxIndex?.let { "step $it" } ?: "not set"}",
+            )
+            Button(
+                onClick = onCaptureMediaMax,
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !ui.mediaFixed,
+            ) {
+                Text("Set current volume as maximum")
+            }
+            Text(
+                "100% reward uses that captured step, not the phone's loudest step. Hardware volume buttons do not raise the ceiling. While feedback is on, the next update moves the stream back to the calculated step.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            ui.mediaNote?.let { note ->
+                Text(note, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+private fun restoreLabel(restore: MediaRestore): String = when (restore) {
+    MediaRestore.YES -> "YES"
+    MediaRestore.NO -> "NO"
+    MediaRestore.NA -> "N/A"
 }
 
 @Composable
@@ -599,6 +686,23 @@ private fun SessionDiagnostics(
                 }",
             )
             SignalSourceLines(ui)
+            Text("External media output: ${if (ui.feedbackDestination == FeedbackDestination.ExternalMedia) "ENABLED" else "DISABLED"}")
+            Text("STREAM_MUSIC current index: ${ui.mediaCurrentIndex}")
+            Text("Maximum device index: ${ui.mediaDeviceMaxIndex}")
+            Text("Captured feedback maximum: ${ui.mediaCapturedMaxIndex?.toString() ?: "—"}")
+            Text("Calculated minimum: ${ui.mediaMinimumIndex?.toString() ?: "—"}")
+            Text("Desired index: ${ui.mediaDesiredIndex?.toString() ?: "—"}")
+            Text("Last applied index: ${ui.mediaLastAppliedIndex?.toString() ?: "—"}")
+            Text("Actual media index: ${ui.mediaCurrentIndex}")
+            Text("Requested gain: ${formatGain(VolumeMapping.linearGain(ui.feedbackVolumePercent))}")
+            Text("Available feedback steps: ${ui.mediaStepCount?.toString() ?: "—"}")
+            Text("Raw reward: ${formatPercent(ui.rewardRaw, decimals = 1)}")
+            Text("Manual override: ${if (ui.manualFeedback) "ON" else "OFF"}")
+            Text("Volume restored: ${restoreLabel(ui.mediaRestore)}")
+            Text(
+                "Hardware volume buttons do not change the captured maximum. The next reward update moves the stream back to the calculated step.",
+                style = MaterialTheme.typography.bodySmall,
+            )
             Text("Elapsed EEG time: ${formatElapsed(ui.elapsedMillis)}")
             Text("Valid observations: ${ui.validObservations}")
             Text("Rejected observations: ${ui.rejectedObservations}")

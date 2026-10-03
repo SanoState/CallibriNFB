@@ -13,9 +13,14 @@ import com.callibri.nfb.callibri.CallibriPermissions
 import com.callibri.nfb.callibri.CallibriState
 import com.callibri.nfb.callibri.ElectrodeContact
 import com.callibri.nfb.callibri.SessionPhase
+import com.callibri.nfb.feedback.AndroidMediaStream
 import com.callibri.nfb.feedback.AudioFeedbackOutput
 import com.callibri.nfb.feedback.FeedbackController
+import com.callibri.nfb.feedback.FeedbackDestination
 import com.callibri.nfb.feedback.FeedbackSnapshot
+import com.callibri.nfb.feedback.MediaVolumeGate
+import com.callibri.nfb.feedback.SelectingFeedbackOutput
+import com.callibri.nfb.feedback.SystemMediaVolumeFeedbackOutput
 import com.callibri.nfb.feedback.RewardPipeline
 import com.callibri.nfb.feedback.RewardState
 import com.callibri.nfb.protocol.FRE1Protocol
@@ -54,7 +59,10 @@ class NeurofeedbackSession(private val app: Application) {
         setBands(FRE1Protocol.defaults().asList())
     }
     private val pipeline = RewardPipeline()
-    private val feedback = FeedbackController(AudioFeedbackOutput())
+    private val mediaGate = MediaVolumeGate(AndroidMediaStream(app))
+    private val mediaOutput = SystemMediaVolumeFeedbackOutput(mediaGate)
+    private val outputs = SelectingFeedbackOutput(AudioFeedbackOutput(), mediaOutput)
+    private val feedback = FeedbackController(outputs)
     private val signalMutex = Mutex()
     private var liveDriveActive = false
     private var processingSession = Long.MIN_VALUE
@@ -73,8 +81,13 @@ class NeurofeedbackSession(private val app: Application) {
         scope = scope,
         onBeforeSignalStart = {
             val floor = _ui.value.appliedMinReward
+            mediaOutput.prepare(manual = _ui.value.manualFeedback, rewardReady = false)
             val snap = feedback.onSessionReset(floor)
-            _ui.update { state -> state.clearedSignal(autoOn = state.autoThreshold).withFeedback(snap) }
+            _ui.update { state ->
+                state.clearedSignal(autoOn = state.autoThreshold)
+                    .withFeedback(snap)
+                    .withMedia(mediaGate.status(snap.requestedPercent), outputs.destination)
+            }
         },
     )
 
@@ -146,7 +159,7 @@ class NeurofeedbackSession(private val app: Application) {
                 permissionsGranted = granted,
                 overlayPermissionGranted = Settings.canDrawOverlays(app),
                 notificationPermissionGranted = notificationsGranted(),
-            )
+            ).withMedia(mediaGate.status(it.feedbackVolumePercent), outputs.destination)
         }
         manager.refreshRadioState()
     }
@@ -206,7 +219,53 @@ class NeurofeedbackSession(private val app: Application) {
 
     fun stopEeg() {
         lifetime.disarm()
+        releaseExternalVolume()
         manager.stopEeg()
+    }
+
+    fun selectBuiltInFeedback() {
+        if (outputs.destination == FeedbackDestination.BuiltIn) return
+        releaseExternalVolume()
+        outputs.select(FeedbackDestination.BuiltIn)
+        publishMedia()
+    }
+
+    fun selectExternalFeedback() {
+        if (mediaGate.isFixed) {
+            _ui.update {
+                it.copy(mediaNote = "External media feedback unavailable on this device.")
+                    .withMedia(mediaGate.status(it.feedbackVolumePercent), outputs.destination)
+            }
+            return
+        }
+        if (outputs.destination == FeedbackDestination.ExternalMedia) return
+        if (_ui.value.audioPlaying) publishFeedback(feedback.stopAudio())
+        outputs.select(FeedbackDestination.ExternalMedia)
+        publishMedia(note = if (mediaGate.capturedMaxIndex == null) {
+            "Set the current volume as the maximum before feedback can move it."
+        } else {
+            null
+        })
+        engageExternalIfNeeded()
+    }
+
+    fun toggleExternalMedia() {
+        if (outputs.destination == FeedbackDestination.ExternalMedia) {
+            selectBuiltInFeedback()
+        } else {
+            selectExternalFeedback()
+        }
+    }
+
+    fun captureMediaMaximum() {
+        val captured = mediaGate.captureCurrentAsMaximum()
+        publishMedia(
+            note = if (captured == null) {
+                "External media feedback unavailable on this device."
+            } else {
+                "Captured media step $captured as the loudest feedback level. Hardware volume buttons do not change this ceiling."
+            },
+        )
     }
 
     fun startTestAudio() {
@@ -221,11 +280,23 @@ class NeurofeedbackSession(private val app: Application) {
         if (enabled) {
             feedback.setManualPercent(_ui.value.rewardSmoothed)
         }
+        mediaOutput.prepare(manual = enabled, rewardReady = _ui.value.rewardReady)
         publishFeedback(feedback.setManualEnabled(enabled))
+        if (enabled) engageExternalIfNeeded()
     }
 
     fun setManualFeedbackPercent(percent: Double) {
-        publishFeedback(feedback.setManualPercent(percent))
+        mediaOutput.prepare(manual = true, rewardReady = _ui.value.rewardReady)
+        val updated = feedback.setManualPercent(percent)
+        val arm = outputs.destination == FeedbackDestination.ExternalMedia &&
+            _ui.value.manualFeedback &&
+            !mediaGate.isControlling
+        if (arm) {
+            engageExternalIfNeeded()
+            if (!mediaGate.isControlling) publishFeedback(updated)
+        } else {
+            publishFeedback(updated)
+        }
     }
 
     fun disconnect() {
@@ -496,6 +567,7 @@ class NeurofeedbackSession(private val app: Application) {
             publishFeedback(feedback.onLiveInactive(stopAudio = stopAudio))
         } else if (streaming && !liveDriveActive) {
             publishFeedback(feedback.markLiveActive())
+            engageExternalIfNeeded()
         }
         liveDriveActive = streaming
         linkWasConnected = connected
@@ -521,23 +593,46 @@ class NeurofeedbackSession(private val app: Application) {
                 sampleRateHz = link.sampleRateHz,
                 linkMessage = link.message,
                 linkMessageIsError = link.messageIsError,
-            )
+            ).withMedia(mediaGate.status(current.feedbackVolumePercent), outputs.destination)
         }
     }
 
     private fun publishFeedback(snapshot: FeedbackSnapshot) {
-        _ui.update { it.withFeedback(snapshot) }
+        _ui.update { it.withFeedback(snapshot).withMedia(mediaGate.status(snapshot.requestedPercent), outputs.destination) }
+    }
+
+    private fun publishMedia(note: String? = _ui.value.mediaNote) {
+        _ui.update { it.copy(mediaNote = note).withMedia(mediaGate.status(it.feedbackVolumePercent), outputs.destination) }
+    }
+
+    private fun releaseExternalVolume() {
+        if (outputs.destination != FeedbackDestination.ExternalMedia) return
+        mediaOutput.prepare(manual = false, rewardReady = false)
+        publishFeedback(feedback.stopAudio())
+    }
+
+    private fun engageExternalIfNeeded() {
+        if (outputs.destination != FeedbackDestination.ExternalMedia) return
+        if (mediaGate.isFixed || mediaGate.capturedMaxIndex == null || mediaGate.isControlling) return
+        val manual = _ui.value.manualFeedback
+        val live = _ui.value.liveFeedbackActive &&
+            _ui.value.streaming &&
+            _ui.value.phase == SessionPhase.Connected
+        if (!manual && !live) return
+        mediaOutput.prepare(manual = manual, rewardReady = _ui.value.rewardReady)
+        publishFeedback(feedback.startAudio())
     }
 
     private fun publishSignal(snapshot: EegSnapshot, reward: RewardState, latestUv: Double?) {
         val active = _ui.value.phase == SessionPhase.Connected && _ui.value.streaming
+        mediaOutput.prepare(manual = _ui.value.manualFeedback, rewardReady = reward.rewardReady)
         val heard = feedback.setLiveReward(reward.smoothedPercent, SystemClock.elapsedRealtime(), active)
         _ui.update { state ->
             if (state.phase != SessionPhase.Connected) return@update state
             state.withReward(reward).withFeedback(heard).copy(
                 latestRawUv = latestUv ?: snapshot.latestRawMicrovolts,
                 waveform = snapshot.waveform,
-            )
+            ).withMedia(mediaGate.status(heard.requestedPercent), outputs.destination)
         }
     }
 
@@ -549,13 +644,15 @@ class NeurofeedbackSession(private val app: Application) {
 
     private fun publishReward(reward: RewardState) {
         val active = _ui.value.phase == SessionPhase.Connected && _ui.value.streaming
+        mediaOutput.prepare(manual = _ui.value.manualFeedback, rewardReady = reward.rewardReady)
         val heard = feedback.setLiveReward(reward.smoothedPercent, SystemClock.elapsedRealtime(), active)
         _ui.update { state ->
-            if (state.phase != SessionPhase.Connected) {
+            val next = if (state.phase != SessionPhase.Connected) {
                 state.copy(autoThreshold = reward.autoEnabled, rewardStatus = reward.statusLabel).withFeedback(heard)
             } else {
                 state.withReward(reward).withFeedback(heard)
             }
+            next.withMedia(mediaGate.status(heard.requestedPercent), outputs.destination)
         }
     }
 

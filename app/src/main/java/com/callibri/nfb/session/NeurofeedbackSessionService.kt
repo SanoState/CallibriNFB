@@ -169,11 +169,14 @@ class NeurofeedbackSessionService : Service() {
             elapsedMillis = state.elapsedMillis,
             electrode = electrodeLabel(state.electrode),
             manualOverride = state.manualFeedback,
+            mediaOn = state.feedbackDestination == com.callibri.nfb.feedback.FeedbackDestination.ExternalMedia,
+            mediaLevelPercent = state.mediaLevelPercent,
         )
         val panel = overlay ?: FeedbackOverlay(
             context = applicationContext,
             onStop = { session.stopEeg() },
             onOpenApp = { openApp() },
+            onToggleMedia = { session.toggleExternalMedia() },
         ).also { overlay = it }
         val shown = panel.render(model)
         if (!shown) session.noteOverlayPermissionDenied()

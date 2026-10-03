@@ -97,6 +97,8 @@ data class OverlayModel(
     val dotArgb: Int,
     /** Null when the session must not present a live reward. */
     val displayedReward: Double?,
+    val mediaOn: Boolean = false,
+    val mediaLevelLabel: String = "—",
 )
 
 object SessionPolicy {
@@ -173,6 +175,8 @@ object SessionPolicy {
         elapsedMillis: Long,
         electrode: String?,
         manualOverride: Boolean,
+        mediaOn: Boolean = false,
+        mediaLevelPercent: Int? = null,
     ): OverlayModel {
         val shown = overlayReward(connected, streaming, smoothedReward)
         val collapsed = if (shown == null) "—" else "${shown.roundToInt().coerceIn(0, 100)}%"
@@ -185,6 +189,8 @@ object SessionPolicy {
             elapsedLabel = String.format(Locale.US, "%.1f s", elapsedMillis.coerceAtLeast(0L) / 1000.0),
             electrodeLabel = electrode,
             manualOverride = manualOverride,
+            mediaOn = mediaOn,
+            mediaLevelLabel = mediaLevelPercent?.let { "$it%" } ?: "—",
             dotArgb = when {
                 connected && streaming -> 0xFF3DDC97.toInt()
                 connected -> 0xFFE0B15A.toInt()

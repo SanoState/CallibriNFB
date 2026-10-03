@@ -23,6 +23,7 @@ class FeedbackOverlay(
     private val context: Context,
     private val onStop: () -> Unit,
     private val onOpenApp: () -> Unit,
+    private val onToggleMedia: () -> Unit = {},
 ) {
     private val windowManager = context.getSystemService(WindowManager::class.java)
     private val density = context.resources.displayMetrics.density
@@ -37,6 +38,9 @@ class FeedbackOverlay(
     private var volumeView: TextView? = null
     private var elapsedView: TextView? = null
     private var electrodeView: TextView? = null
+    private var mediaStateView: TextView? = null
+    private var mediaLevelView: TextView? = null
+    private var mediaToggle: TextView? = null
     private var manualView: TextView? = null
     private var expanded = false
     private var posX = dp(12)
@@ -79,9 +83,13 @@ class FeedbackOverlay(
         eegView?.text = "EEG: ${model.eegLabel}"
         smoothedView?.text = "Smoothed reward: ${model.smoothedLabel}"
         volumeView?.text = "Feedback volume: ${model.volumeLabel}"
+        mediaStateView?.text = "Media feedback: ${if (model.mediaOn) "ON" else "OFF"}"
+        mediaLevelView?.text = "Media level: ${model.mediaLevelLabel}"
+        mediaToggle?.text = if (model.mediaOn) "Media feedback off" else "Media feedback on"
         elapsedView?.text = "Elapsed: ${model.elapsedLabel}"
         val electrode = model.electrodeLabel
         electrodeView?.text = if (electrode.isNullOrBlank()) "Electrodes: —" else "Electrodes: $electrode"
+        manualView?.text = "Manual test is overriding the reward."
         manualView?.visibility = if (model.manualOverride) View.VISIBLE else View.GONE
         return root != null
     }
@@ -130,8 +138,13 @@ class FeedbackOverlay(
         val volume = line()
         val elapsed = line()
         val electrode = line()
+        val mediaState = line()
+        val mediaLevel = line()
+        val mediaButton = chip("Media feedback on").apply {
+            setOnClickListener { onToggleMedia() }
+        }
         val manual = line().apply {
-            text = "Manual test is overriding the tone."
+            text = "Manual test is overriding the reward."
             visibility = View.GONE
         }
         val stopSession = chip("Stop session").apply {
@@ -147,6 +160,9 @@ class FeedbackOverlay(
         details.addView(eeg)
         details.addView(smoothed)
         details.addView(volume)
+        details.addView(mediaState)
+        details.addView(mediaLevel)
+        details.addView(mediaButton.paddedTop())
         details.addView(elapsed)
         details.addView(electrode)
         details.addView(manual)
@@ -180,6 +196,9 @@ class FeedbackOverlay(
         eegView = eeg
         smoothedView = smoothed
         volumeView = volume
+        mediaStateView = mediaState
+        mediaLevelView = mediaLevel
+        mediaToggle = mediaButton
         elapsedView = elapsed
         electrodeView = electrode
         manualView = manual

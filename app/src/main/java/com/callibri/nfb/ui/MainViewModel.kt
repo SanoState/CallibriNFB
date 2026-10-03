@@ -6,7 +6,10 @@ import com.callibri.nfb.callibri.CallibriDevice
 import com.callibri.nfb.callibri.ElectrodeContact
 import com.callibri.nfb.callibri.SessionPhase
 import com.callibri.nfb.callibri.SignalIngress
+import com.callibri.nfb.feedback.FeedbackDestination
 import com.callibri.nfb.feedback.FeedbackSnapshot
+import com.callibri.nfb.feedback.MediaRestore
+import com.callibri.nfb.feedback.MediaVolumeStatus
 import com.callibri.nfb.feedback.RewardState
 import com.callibri.nfb.protocol.BandGoal
 import com.callibri.nfb.protocol.FRE1Protocol
@@ -89,6 +92,20 @@ data class MainUiState(
     val overlayVisible: Boolean = false,
     val overlayDisplayedReward: Double? = null,
     val serviceStartedAtElapsedMs: Long? = null,
+    val feedbackDestination: FeedbackDestination = FeedbackDestination.BuiltIn,
+    val mediaFixed: Boolean = false,
+    val mediaCurrentIndex: Int = 0,
+    val mediaDeviceMaxIndex: Int = 0,
+    val mediaCapturedMaxIndex: Int? = null,
+    val mediaMinimumIndex: Int? = null,
+    val mediaDesiredIndex: Int? = null,
+    val mediaLastAppliedIndex: Int? = null,
+    val mediaStepCount: Int? = null,
+    val mediaControlling: Boolean = false,
+    val mediaRestore: MediaRestore = MediaRestore.NA,
+    val mediaCurrentPercent: Int = 0,
+    val mediaLevelPercent: Int? = null,
+    val mediaNote: String? = null,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -131,6 +148,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setOverlayWanted(wanted: Boolean) = session.setOverlayWanted(wanted)
 
+    fun selectBuiltInFeedback() = session.selectBuiltInFeedback()
+
+    fun selectExternalFeedback() = session.selectExternalFeedback()
+
+    fun captureMediaMaximum() = session.captureMediaMaximum()
+
     fun updateLow(id: String, text: String) = session.updateLow(id, text)
 
     fun updateHigh(id: String, text: String) = session.updateHigh(id, text)
@@ -161,6 +184,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
 internal fun electrodeAcceptable(electrode: ElectrodeContact?): Boolean =
     electrode == null || electrode == ElectrodeContact.Normal
+
+internal fun MainUiState.withMedia(status: MediaVolumeStatus, destination: FeedbackDestination): MainUiState = copy(
+    feedbackDestination = destination,
+    mediaFixed = status.fixed,
+    mediaCurrentIndex = status.currentIndex,
+    mediaDeviceMaxIndex = status.deviceMaxIndex,
+    mediaCapturedMaxIndex = status.capturedMaxIndex,
+    mediaMinimumIndex = status.minimumIndex,
+    mediaDesiredIndex = status.desiredIndex,
+    mediaLastAppliedIndex = status.lastAppliedIndex,
+    mediaStepCount = status.stepCount,
+    mediaControlling = status.controlling,
+    mediaRestore = status.restore,
+    mediaCurrentPercent = status.currentPercent,
+    mediaLevelPercent = status.levelPercent,
+)
 
 internal fun MainUiState.withFeedback(snapshot: FeedbackSnapshot): MainUiState = copy(
     feedbackVolumePercent = snapshot.requestedPercent,

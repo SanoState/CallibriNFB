@@ -1,6 +1,6 @@
 # Callibri NFB
 
-Android app for one [Callibri](https://brainbit.com/) EEG sensor. It scans, connects, streams 250 Hz raw EEG through BrainBit NeuroSDK 2, converts volts to microvolts, and shows three live FRE1 band amplitudes plus a continuous neurofeedback reward. The smoothed reward sets the volume of a built-in test tone. It does not change the phone's media volume or other apps' audio. Sessions are not saved.
+Android app for one [Callibri](https://brainbit.com/) EEG sensor. It scans, connects, streams 250 Hz raw EEG through BrainBit NeuroSDK 2, converts volts to microvolts, and shows three live FRE1 band amplitudes plus a continuous neurofeedback reward. The smoothed reward sets the volume of a built-in test tone. External media feedback is off until you select it. That mode uses Android media volume, with your chosen listening level as the loudest step, and restores the previous volume when feedback stops. Sessions are not saved.
 
 Starting EEG also starts a foreground service so the same session keeps running when you leave the app. Floating feedback is off until you turn it on. That asks for permission to display over other apps, then shows a small draggable overlay with the smoothed reward.
 
