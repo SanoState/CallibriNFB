@@ -10,6 +10,8 @@ data class BandThresholdSpec(
     val targetSuccess: Double,
     val weight: Double,
     val manualThresholdUv: Double = DEFAULT_MANUAL_UV,
+    /** When false, the band is measured but left out of the combined reward. */
+    val enabled: Boolean = true,
 ) {
     companion object {
         const val DEFAULT_MANUAL_UV = 10.0
@@ -28,7 +30,7 @@ data class BandThresholdSpec(
 /**
  * Knobs for auto-threshold and the reward map. Defaults come from [FRE1Protocol].
  *
- * Reward stays at [minRewardPercent] until every band has
+ * Reward stays at [minRewardPercent] until every enabled band has
  * [minimumValidObservations] valid readings. Provisional thresholds are still
  * shown once a band reaches that count, so the first 30 seconds can move
  * without waiting for a full window before any number appears.

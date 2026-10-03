@@ -20,6 +20,7 @@ data class BandThresholdReading(
     val windowSuccess: Double?,
     val latestAccepted: Boolean,
     val scoringAmplitudeUv: Double?,
+    val enabled: Boolean,
 )
 
 /**
@@ -46,6 +47,11 @@ class AutoThresholdController(
         bands[bandId]?.manualUv = microvolts
     }
 
+    /** Flips participation only. The rolling window and the current threshold stay as they are. */
+    fun setEnabled(bandId: String, enabled: Boolean) {
+        bands[bandId]?.enabled = enabled
+    }
+
     fun reset() {
         bands.values.forEach { it.rolling.reset() }
     }
@@ -58,6 +64,12 @@ class AutoThresholdController(
         val byId = readings.associateBy { it.bandId }
         return bands.map { (id, state) ->
             val reading = byId[id]
+            if (!state.enabled) {
+                if (reading != null && reading.microvolts.isFinite()) {
+                    state.lastAmplitude = reading.microvolts
+                }
+                return@map state.snapshot(id, latestAccepted = false)
+            }
             val accepted = if (reading != null) {
                 state.lastAmplitude = reading.microvolts
                 val took = state.rolling.accept(timeMs, reading.microvolts, contactAcceptable)
@@ -69,27 +81,19 @@ class AutoThresholdController(
             }
             val autoThreshold = state.rolling.threshold(timeMs)
             val used = if (autoEnabled) autoThreshold else state.manualUv
-            BandThresholdReading(
-                bandId = id,
-                goal = state.goal,
-                amplitudeUv = state.lastAmplitude,
-                thresholdUv = used,
-                targetSuccess = state.targetSuccess,
-                weight = state.weight,
-                validInWindow = state.rolling.windowSize(timeMs),
-                acceptedTotal = state.rolling.acceptedCount,
-                rejectedTotal = state.rolling.rejectedCount,
-                windowSuccess = if (used != null) state.rolling.fractionOnSuccessSide(used, timeMs) else null,
-                latestAccepted = accepted,
-                scoringAmplitudeUv = state.lastAcceptedAmplitude,
-            )
+            state.heldThresholdUv = used
+            state.heldWindowSize = state.rolling.windowSize(timeMs)
+            state.heldWindowSuccess = if (used != null) state.rolling.fractionOnSuccessSide(used, timeMs) else null
+            state.snapshot(id, latestAccepted = accepted)
         }
     }
 
-    /** True when every band can contribute a real threshold to the reward. */
+    /** True when every enabled band can contribute a real threshold. No enabled bands means not ready. */
     fun readyForReward(nowMs: Long): Boolean {
-        if (!autoEnabled) return bands.values.all { it.manualUv > 0.0 }
-        return bands.values.all { it.rolling.threshold(nowMs) != null }
+        val active = bands.values.filter { it.enabled }
+        if (active.isEmpty()) return false
+        if (!autoEnabled) return active.all { it.manualUv > 0.0 }
+        return active.all { it.rolling.threshold(nowMs) != null }
     }
 
     private fun rebuild(config: ThresholdConfig, keepSamples: Boolean) {
@@ -120,9 +124,13 @@ class AutoThresholdController(
                 targetSuccess = spec.targetSuccess,
                 weight = spec.weight,
                 manualUv = spec.manualThresholdUv,
+                enabled = spec.enabled,
                 rolling = rolling,
                 lastAmplitude = existing?.lastAmplitude,
                 lastAcceptedAmplitude = existing?.lastAcceptedAmplitude,
+                heldThresholdUv = existing?.heldThresholdUv,
+                heldWindowSize = existing?.heldWindowSize ?: 0,
+                heldWindowSuccess = existing?.heldWindowSuccess,
             )
         }
         bands.clear()
@@ -134,8 +142,28 @@ class AutoThresholdController(
         var targetSuccess: Double,
         var weight: Double,
         var manualUv: Double,
+        var enabled: Boolean,
         val rolling: RollingThreshold,
         var lastAmplitude: Double?,
         var lastAcceptedAmplitude: Double?,
-    )
+        var heldThresholdUv: Double? = null,
+        var heldWindowSize: Int = 0,
+        var heldWindowSuccess: Double? = null,
+    ) {
+        fun snapshot(id: String, latestAccepted: Boolean) = BandThresholdReading(
+            bandId = id,
+            goal = goal,
+            amplitudeUv = lastAmplitude,
+            thresholdUv = heldThresholdUv,
+            targetSuccess = targetSuccess,
+            weight = weight,
+            validInWindow = heldWindowSize,
+            acceptedTotal = rolling.acceptedCount,
+            rejectedTotal = rolling.rejectedCount,
+            windowSuccess = heldWindowSuccess,
+            latestAccepted = latestAccepted,
+            scoringAmplitudeUv = lastAcceptedAmplitude,
+            enabled = enabled,
+        )
+    }
 }

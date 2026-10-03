@@ -40,7 +40,7 @@ object FRE1Protocol {
     /**
      * Valid amplitude readings required in a band before its threshold may
      * move the reward. At ~6 updates/s this is a little over one second.
-     * Until every band reaches this count, reward stays at [MIN_REWARD_PERCENT].
+     * Until every enabled band reaches this count, reward stays at [MIN_REWARD_PERCENT].
      */
     const val MIN_VALID_OBSERVATIONS = 8
 

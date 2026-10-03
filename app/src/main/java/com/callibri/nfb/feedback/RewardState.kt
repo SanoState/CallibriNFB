@@ -14,6 +14,8 @@ data class BandRewardState(
     val windowSuccess: Double?,
     val validInWindow: Int,
     val latestAccepted: Boolean,
+    val enabled: Boolean,
+    val includedInReward: Boolean,
 )
 
 data class RewardState(
@@ -27,9 +29,11 @@ data class RewardState(
     val rejectedObservations: Int,
     val bands: List<BandRewardState>,
     val autoEnabled: Boolean,
+    val activeBandCount: Int,
 ) {
     val statusLabel: String
         get() {
+            if (activeBandCount == 0) return "No active training bands"
             if (!autoEnabled) return "Auto threshold: Off"
             if (calibrating || !rewardReady) {
                 val elapsedSeconds = (elapsedMillis / 1_000L).toInt().coerceAtLeast(0)
@@ -46,8 +50,10 @@ data class RewardState(
  * Call it from the signal thread, not from Compose.
  *
  * Until auto-threshold has [ThresholdConfig.minimumValidObservations] valid
- * readings in every band, both raw and smoothed reward stay at the configured
- * minimum. That avoids a score built from one or two samples.
+ * readings in every enabled band, both raw and smoothed reward stay at the
+ * configured minimum. Disabled bands keep their amplitude and threshold, and
+ * their scores are left out before this combination. With no enabled band
+ * there is no live reward.
  */
 class RewardPipeline(
     config: ThresholdConfig = ThresholdConfig(),
@@ -72,6 +78,16 @@ class RewardPipeline(
 
     fun setManualThreshold(bandId: String, microvolts: Double) {
         thresholds.setManualThreshold(bandId, microvolts)
+    }
+
+    /** Participation only. Does not reset the threshold window or the smoother. */
+    fun setBandEnabled(bandId: String, enabled: Boolean) {
+        thresholds.setEnabled(bandId, enabled)
+        config = config.copy(
+            bands = config.bands.map { spec ->
+                if (spec.bandId == bandId) spec.copy(enabled = enabled) else spec
+            },
+        )
     }
 
     fun resetSession() {
@@ -113,13 +129,15 @@ class RewardPipeline(
     ): RewardState {
         val start = sessionStartMs ?: timeMs
         val elapsed = (timeMs - start).coerceAtLeast(0L)
-        val ready = thresholds.readyForReward(timeMs)
+        val activeCount = bandReadings.count { it.enabled }
+        val ready = activeCount > 0 && thresholds.readyForReward(timeMs)
         val scores = DoubleArray(bandReadings.size)
         val weights = DoubleArray(bandReadings.size)
         val bandStates = bandReadings.mapIndexed { index, band ->
-            weights[index] = band.weight
-            val score = if (band.thresholdUv != null && band.scoringAmplitudeUv != null) {
-                RewardCalculator.bandScore(band.scoringAmplitudeUv, band.thresholdUv, band.goal)
+            weights[index] = if (band.enabled) band.weight else 0.0
+            val scoredUv = if (band.enabled) band.scoringAmplitudeUv else band.amplitudeUv ?: band.scoringAmplitudeUv
+            val score = if (band.thresholdUv != null && scoredUv != null) {
+                RewardCalculator.bandScore(scoredUv, band.thresholdUv, band.goal)
             } else {
                 null
             }
@@ -148,7 +166,8 @@ class RewardPipeline(
         } else {
             stepped.coerceAtMost(100.0)
         }
-        val calibrating = thresholds.autoEnabled && elapsed < config.windowMillis
+        val calibrating = activeCount > 0 && thresholds.autoEnabled && elapsed < config.windowMillis
+        val participating = bandReadings.filter { it.enabled }
         return RewardState(
             rawPercent = raw,
             smoothedPercent = smoothedOut,
@@ -156,26 +175,30 @@ class RewardPipeline(
             calibrating = calibrating,
             elapsedMillis = elapsed,
             windowMillis = config.windowMillis,
-            validObservations = bandReadings.sumOf { it.acceptedTotal },
-            rejectedObservations = bandReadings.sumOf { it.rejectedTotal },
+            validObservations = participating.sumOf { it.acceptedTotal },
+            rejectedObservations = participating.sumOf { it.rejectedTotal },
             bands = bandStates,
             autoEnabled = thresholds.autoEnabled,
+            activeBandCount = activeCount,
         )
     }
 
     private fun resting(bandReadings: List<BandThresholdReading>): RewardState {
         val floor = config.minRewardPercent.coerceIn(0.0, 100.0)
+        val activeCount = bandReadings.count { it.enabled }
+        val participating = bandReadings.filter { it.enabled }
         return RewardState(
             rawPercent = floor,
             smoothedPercent = floor,
             rewardReady = false,
-            calibrating = thresholds.autoEnabled,
+            calibrating = activeCount > 0 && thresholds.autoEnabled,
             elapsedMillis = 0L,
             windowMillis = config.windowMillis,
-            validObservations = bandReadings.sumOf { it.acceptedTotal },
-            rejectedObservations = bandReadings.sumOf { it.rejectedTotal },
+            validObservations = participating.sumOf { it.acceptedTotal },
+            rejectedObservations = participating.sumOf { it.rejectedTotal },
             bands = bandReadings.map { it.toRewardState(score = null) },
             autoEnabled = thresholds.autoEnabled,
+            activeBandCount = activeCount,
         )
     }
 
@@ -193,4 +216,6 @@ private fun BandThresholdReading.toRewardState(score: Double?) = BandRewardState
     windowSuccess = windowSuccess,
     validInWindow = validInWindow,
     latestAccepted = latestAccepted,
+    enabled = enabled,
+    includedInReward = enabled && weight > 0.0,
 )

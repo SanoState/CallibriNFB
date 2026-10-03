@@ -56,9 +56,11 @@ Unit tests for the filters, rolling thresholds, and reward math (no device requi
 
 Each band keeps its own 30 second window of valid RMS readings (about 6 per second). The threshold is a percentile of that window, not an average. Inhibit 1 and Inhibit 2 (target 80%) use the percentile where about 80% of recent amplitudes fall below it. Reward (target 70%) uses the percentile where about 70% fall above it.
 
-A band score is 50% when the current amplitude equals the threshold, and it moves gradually as the ratio to the threshold changes. The three scores are weighted 33.3% / 33.4% / 33.3% and mapped so the result stays between 20% and 100%. An exponential smoother with a 500 ms time constant is applied to that final percent.
+A band score is 50% when the current amplitude equals the threshold, and it moves gradually as the ratio to the threshold changes. Each band has its own switch. Only enabled bands enter the combined reward, and their weights are renormalized, so turning a band off does not count as a failed score. One enabled band is the whole reward. With every band off, EEG can keep running, but there is no live reward and the feedback outputs go neutral. The switch is saved with the protocol. Disabling a band pauses its auto-threshold; turning it back on keeps the threshold it already had.
 
-Until every band has 8 valid readings, the reward is held at 20% and the screen keeps saying it is calibrating.
+The enabled scores are weighted (33.3% / 33.4% / 33.3% when all three are on) and mapped so the result stays between 20% and 100%. An exponential smoother with a 500 ms time constant is applied to that final percent, and the feedback range is applied after the smoother.
+
+Until every enabled band has 8 valid readings, the reward is held at 20% and the screen keeps saying it is calibrating.
 
 The smoothed reward is the only input to test-audio loudness: `volume = clamp(smoothedReward, 20, 100) / 100`. A 20% reward is gain 0.20, not silence. The tone is a gapless loop of 196 Hz and 294 Hz played on an `AudioTrack` owned by this app. Start Test Audio and Stop Test Audio do not start or stop EEG. Stopping EEG or disconnecting the sensor stops that tone unless Manual feedback test is on, in which case the diagnostic slider keeps the same gain path. Turning manual mode off returns the tone to the live smoothed reward. Smoothing response ms is still the reward smoother's time constant; volume does not have a second smoother. NaN, infinities, amplitudes above 200 µV, and samples while the electrode is detached or high resistance are counted as rejected and do not enter the window.
 

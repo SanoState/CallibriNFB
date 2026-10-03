@@ -80,6 +80,33 @@ class SessionBackgroundTest {
     }
 
     @Test
+    fun overlayClearsTheMeterWhenNoTrainingBandIsEnabled() {
+        val model = SessionPolicy.overlayModel(
+            connected = true,
+            streaming = true,
+            smoothedReward = 88.0,
+            volumePercent = 88.0,
+            elapsedMillis = 4_000L,
+            electrode = "Contact good",
+            manualOverride = false,
+            trainingActive = false,
+        )
+        assertNull(model.displayedReward)
+        assertEquals("Off", model.collapsedReward)
+        assertEquals("No active training bands", model.smoothedLabel)
+        assertEquals(0.0, model.barFraction, 0.0)
+        assertFalse(SessionPolicy.trainingDrivesFeedback(activeBandCount = 0, rewardReady = false))
+        assertFalse(SessionPolicy.trainingDrivesFeedback(activeBandCount = 0, rewardReady = true))
+        val copy = SessionPolicy.notificationCopy(
+            connected = true,
+            streaming = true,
+            smoothedReward = 88.0,
+            trainingActive = false,
+        )
+        assertEquals("No active training bands", copy.detail)
+    }
+
+    @Test
     fun rewardMeterStaysAboveTheDimmingLayer() {
         assertFalse(
             SessionPolicy.shouldRaiseRewardMeter(

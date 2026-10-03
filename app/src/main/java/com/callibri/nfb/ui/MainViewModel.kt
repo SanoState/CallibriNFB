@@ -38,6 +38,8 @@ data class BandUi(
     val manualThresholdUv: Double,
     val manualText: String,
     val goal: BandGoal,
+    val enabled: Boolean = true,
+    val includedInReward: Boolean = true,
 )
 
 data class MainUiState(
@@ -121,6 +123,7 @@ data class MainUiState(
     val feedbackLowerBound: Double = FeedbackIntensity.DEFAULT_LOWER,
     val feedbackUpperBound: Double = FeedbackIntensity.DEFAULT_UPPER,
     val feedbackIntensity: Double = 0.0,
+    val activeBandCount: Int = 3,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -197,6 +200,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setAutoThreshold(enabled: Boolean) = session.setAutoThreshold(enabled)
 
+    fun setBandEnabled(id: String, enabled: Boolean) = session.setBandEnabled(id, enabled)
+
     fun applyBands() = session.applyBands()
 
     fun applyFeedbackSettings() = session.applyFeedbackSettings()
@@ -239,9 +244,12 @@ internal fun MainUiState.withFeedback(snapshot: FeedbackSnapshot): MainUiState =
 
 internal fun MainUiState.withOutputMapping(): MainUiState {
     val command = if (manualFeedback) feedbackVolumePercent else rewardSmoothed
-    return copy(
-        feedbackIntensity = FeedbackIntensity.intensity(command, feedbackLowerBound, feedbackUpperBound),
-    )
+    val intensity = if (!manualFeedback && activeBandCount == 0) {
+        0.0
+    } else {
+        FeedbackIntensity.intensity(command, feedbackLowerBound, feedbackUpperBound)
+    }
+    return copy(feedbackIntensity = intensity)
 }
 
 internal fun MainUiState.withReward(reward: RewardState): MainUiState = copy(
@@ -253,6 +261,7 @@ internal fun MainUiState.withReward(reward: RewardState): MainUiState = copy(
     validObservations = reward.validObservations,
     rejectedObservations = reward.rejectedObservations,
     autoThreshold = reward.autoEnabled,
+    activeBandCount = reward.activeBandCount,
     bands = bands.map { band ->
         val match = reward.bands.firstOrNull { it.bandId == band.id } ?: return@map band
         band.copy(
@@ -263,6 +272,8 @@ internal fun MainUiState.withReward(reward: RewardState): MainUiState = copy(
             windowSuccess = match.windowSuccess,
             validInWindow = match.validInWindow,
             latestAccepted = match.latestAccepted,
+            enabled = match.enabled,
+            includedInReward = match.includedInReward,
         )
     },
 ).withOutputMapping()
@@ -270,7 +281,11 @@ internal fun MainUiState.withReward(reward: RewardState): MainUiState = copy(
 internal fun MainUiState.clearedSignal(autoOn: Boolean): MainUiState {
     val windowSeconds = windowText.trim().toDoubleOrNull()?.toInt()?.coerceAtLeast(1)
         ?: FRE1Protocol.WINDOW_SECONDS.toInt()
-    val status = if (autoOn) "Calibrating... 0 / $windowSeconds seconds" else "Auto threshold: Off"
+    val status = when {
+        bands.none { it.enabled } -> "No active training bands"
+        autoOn -> "Calibrating... 0 / $windowSeconds seconds"
+        else -> "Auto threshold: Off"
+    }
     return copy(
         rewardRaw = appliedMinReward,
         rewardSmoothed = appliedMinReward,

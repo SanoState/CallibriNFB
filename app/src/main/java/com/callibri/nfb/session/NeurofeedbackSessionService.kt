@@ -147,6 +147,7 @@ class NeurofeedbackSessionService : Service() {
             connected = state.phase == SessionPhase.Connected,
             streaming = state.streaming,
             smoothedReward = state.rewardSmoothed,
+            trainingActive = state.activeBandCount > 0 || state.manualFeedback,
         )
         val key = copy.text + "|" + copy.detail
         if (key != lastNotificationKey) {
@@ -184,6 +185,7 @@ class NeurofeedbackSessionService : Service() {
             },
             feedbackLowerBound = state.feedbackLowerBound,
             feedbackUpperBound = state.feedbackUpperBound,
+            trainingActive = state.activeBandCount > 0 || state.manualFeedback,
         )
         val panel = overlay ?: FeedbackOverlay(
             context = applicationContext,
@@ -239,6 +241,7 @@ class NeurofeedbackSessionService : Service() {
             connected = state.phase == SessionPhase.Connected,
             streaming = state.streaming,
             smoothedReward = state.rewardSmoothed,
+            trainingActive = state.activeBandCount > 0 || state.manualFeedback,
         )
         val notification = buildNotification(copy)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {

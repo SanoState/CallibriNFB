@@ -14,6 +14,7 @@ import com.callibri.nfb.callibri.CallibriState
 import com.callibri.nfb.callibri.ElectrodeContact
 import com.callibri.nfb.callibri.SessionPhase
 import com.callibri.nfb.feedback.AndroidMediaStream
+import com.callibri.nfb.feedback.BandEnablePreference
 import com.callibri.nfb.feedback.AudioFeedbackOutput
 import com.callibri.nfb.feedback.ExternalEngagement
 import com.callibri.nfb.feedback.FeedbackController
@@ -77,6 +78,7 @@ class NeurofeedbackSession(private val app: Application) {
     private val safeMaxAlpha = TouchObscuringLimit.safeMaximum(systemObscuringOpacity).toDouble()
     private val dimming = DimmingOverlay(app, safeMaxAlpha.toFloat())
     private val visualPrefs = VisualDimPreference(app)
+    private val bandPrefs = BandEnablePreference(app)
     private var maxDimAlpha = visualPrefs.load(safeMaxAlpha)
     private val storedRange = visualPrefs.loadRange()
     @Volatile
@@ -91,6 +93,7 @@ class NeurofeedbackSession(private val app: Application) {
     private val visualUpdateTimes = ArrayDeque<Long>()
     private val signalMutex = Mutex()
     private var liveDriveActive = false
+    private var liveOutputsNeutral = false
     private var processingSession = Long.MIN_VALUE
     private var lastProcessErrorNs = 0L
     private var lastRawUiNs = 0L
@@ -117,6 +120,15 @@ class NeurofeedbackSession(private val app: Application) {
     val ui: StateFlow<MainUiState> = _ui.asStateFlow()
 
     init {
+        val savedBands = _ui.value.bands.map { band -> band.copy(enabled = bandPrefs.isEnabled(band.id)) }
+        savedBands.forEach { pipeline.setBandEnabled(it.id, it.enabled) }
+        val savedActive = savedBands.count { it.enabled }
+        _ui.value = _ui.value.copy(
+            bands = savedBands,
+            activeBandCount = savedActive,
+            rewardStatus = if (savedActive == 0) "No active training bands" else _ui.value.rewardStatus,
+            rewardReady = false,
+        )
         feedback.setFeedbackRange(feedbackLowerBound, feedbackUpperBound)
         Log.i(
             TAG,
@@ -562,6 +574,29 @@ class NeurofeedbackSession(private val app: Application) {
         }
     }
 
+    fun setBandEnabled(id: String, enabled: Boolean) {
+        bandPrefs.save(id, enabled)
+        _ui.update { state ->
+            val bands = state.bands.map { band ->
+                if (band.id == id) band.copy(enabled = enabled, includedInReward = enabled && band.weight > 0.0) else band
+            }
+            val active = bands.count { it.enabled }
+            state.copy(
+                bands = bands,
+                activeBandCount = active,
+                rewardReady = if (active == 0) false else state.rewardReady,
+                rewardStatus = if (active == 0) "No active training bands" else state.rewardStatus,
+            )
+        }
+        scope.launch(Dispatchers.Default) {
+            val reward = signalMutex.withLock {
+                pipeline.setBandEnabled(id, enabled)
+                pipeline.recompute(SystemClock.elapsedRealtime())
+            }
+            publishReward(reward)
+        }
+    }
+
     fun applyBands() {
         val parsed = ArrayList<FrequencyBand>(_ui.value.bands.size)
         for (band in _ui.value.bands) {
@@ -666,6 +701,7 @@ class NeurofeedbackSession(private val app: Application) {
                 targetSuccess = parsedTargets.getValue(band.id),
                 weight = parsedWeights.getValue(band.id) / weightSum,
                 manualThresholdUv = parsedManuals.getValue(band.id),
+                enabled = band.enabled,
             )
         }
         val config = ThresholdConfig(
@@ -783,9 +819,10 @@ class NeurofeedbackSession(private val app: Application) {
         publishFeedback(feedback.stopAudio())
     }
 
-    private fun engageExternalIfNeeded() {
+    private fun engageExternalIfNeeded(rewardReady: Boolean = _ui.value.rewardReady) {
         if (!audioEnabled) return
         val state = _ui.value
+        if (state.activeBandCount == 0 && !state.manualFeedback) return
         val manual = state.manualFeedback
         val streaming = state.streaming && state.phase == SessionPhase.Connected
         if (!ExternalEngagement.shouldStart(
@@ -799,15 +836,13 @@ class NeurofeedbackSession(private val app: Application) {
         ) {
             return
         }
-        mediaOutput.prepare(manual = manual, rewardReady = state.rewardReady)
+        mediaOutput.prepare(manual = manual, rewardReady = rewardReady)
         publishFeedback(feedback.startAudio())
     }
 
     private fun publishSignal(snapshot: EegSnapshot, reward: RewardState, latestUv: Double?) {
         val active = _ui.value.phase == SessionPhase.Connected && _ui.value.streaming
-        if (active && audioEnabled) engageExternalIfNeeded()
-        mediaOutput.prepare(manual = _ui.value.manualFeedback, rewardReady = reward.rewardReady)
-        val heard = feedback.setLiveReward(reward.smoothedPercent, SystemClock.elapsedRealtime(), active)
+        val heard = applyLiveOutputs(reward, active)
         val manual = _ui.value.manualFeedback
         _ui.update { state ->
             if (state.phase != SessionPhase.Connected) return@update state
@@ -817,7 +852,14 @@ class NeurofeedbackSession(private val app: Application) {
                 audioFeedbackEnabled = audioEnabled,
             ).withMedia(mediaStatus(heard.requestedPercent), outputs.destination)
         }
-        if (!manual) pushVisual(reward.smoothedPercent, reward.rewardReady, manual = false, liveSample = true)
+        if (!manual) {
+            pushVisual(
+                percent = if (reward.activeBandCount > 0) reward.smoothedPercent else feedbackLowerBound,
+                rewardReady = reward.rewardReady && reward.activeBandCount > 0,
+                manual = false,
+                liveSample = true,
+            )
+        }
     }
 
     private fun publishIncoming(latestUv: Double) {
@@ -828,19 +870,64 @@ class NeurofeedbackSession(private val app: Application) {
 
     private fun publishReward(reward: RewardState) {
         val active = _ui.value.phase == SessionPhase.Connected && _ui.value.streaming
-        mediaOutput.prepare(manual = _ui.value.manualFeedback, rewardReady = reward.rewardReady)
         val manual = _ui.value.manualFeedback
-        val heard = feedback.setLiveReward(reward.smoothedPercent, SystemClock.elapsedRealtime(), active)
+        val heard = applyLiveOutputs(reward, active)
         _ui.update { state ->
             val next = if (state.phase != SessionPhase.Connected) {
-                state.copy(autoThreshold = reward.autoEnabled, rewardStatus = reward.statusLabel).withFeedback(heard)
+                state.copy(
+                    autoThreshold = reward.autoEnabled,
+                    rewardStatus = reward.statusLabel,
+                    activeBandCount = reward.activeBandCount,
+                    rewardReady = reward.rewardReady,
+                    bands = state.bands.map { band ->
+                        val match = reward.bands.firstOrNull { it.bandId == band.id } ?: return@map band
+                        band.copy(enabled = match.enabled, includedInReward = match.includedInReward)
+                    },
+                ).withFeedback(heard)
             } else {
                 state.withReward(reward).withFeedback(heard)
             }
             next.copy(audioFeedbackEnabled = audioEnabled)
                 .withMedia(mediaStatus(heard.requestedPercent), outputs.destination)
         }
-        if (!manual) pushVisual(reward.smoothedPercent, reward.rewardReady, manual = false, liveSample = true)
+        if (!manual) {
+            pushVisual(
+                percent = if (reward.activeBandCount > 0) reward.smoothedPercent else feedbackLowerBound,
+                rewardReady = reward.rewardReady && reward.activeBandCount > 0,
+                manual = false,
+                liveSample = true,
+            )
+        }
+    }
+
+    /**
+     * Disabled bands are already excluded from [reward]. With none left, outputs
+     * leave the last reward: external media is restored, and built-in audio sits
+     * at the bottom of the feedback range instead of holding the previous level.
+     */
+    private fun applyLiveOutputs(reward: RewardState, sessionActive: Boolean): FeedbackSnapshot {
+        val manual = _ui.value.manualFeedback
+        val training = reward.activeBandCount > 0
+        if (sessionActive && audioEnabled && (training || manual)) {
+            engageExternalIfNeeded(rewardReady = manual || reward.rewardReady)
+        }
+        if (!manual && !training) {
+            if (!liveOutputsNeutral) {
+                liveOutputsNeutral = true
+                releaseExternalVolume()
+            }
+        } else if (training || manual) {
+            liveOutputsNeutral = false
+        }
+        mediaOutput.prepare(manual = manual, rewardReady = training && reward.rewardReady)
+        val now = SystemClock.elapsedRealtime()
+        return if (training || manual) {
+            feedback.setLiveReward(reward.smoothedPercent, now, sessionActive)
+        } else if (outputs.destination == FeedbackDestination.ExternalMedia) {
+            feedback.setLiveReward(feedbackLowerBound, now, active = false)
+        } else {
+            feedback.setLiveReward(feedbackLowerBound, now, sessionActive)
+        }
     }
 
     private fun currentBands(): List<FrequencyBand> =

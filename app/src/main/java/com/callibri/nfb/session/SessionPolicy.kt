@@ -124,8 +124,16 @@ object SessionPolicy {
     ): Boolean = dimmingAttached && dimmingGeneration != alreadyRaisedGeneration
 
     /** The overlay prints the existing smoothed reward, and only while feedback is live. */
-    fun overlayReward(connected: Boolean, streaming: Boolean, smoothedReward: Double): Double? =
-        if (presentActiveReward(connected, streaming)) smoothedReward else null
+    fun overlayReward(
+        connected: Boolean,
+        streaming: Boolean,
+        smoothedReward: Double,
+        trainingActive: Boolean = true,
+    ): Double? =
+        if (presentActiveReward(connected, streaming) && trainingActive) smoothedReward else null
+
+    fun trainingDrivesFeedback(activeBandCount: Int, rewardReady: Boolean): Boolean =
+        activeBandCount > 0 && rewardReady
 
     fun eegStartFailed(
         phase: SessionPhase,
@@ -160,7 +168,12 @@ object SessionPolicy {
         return next to retire
     }
 
-    fun notificationCopy(connected: Boolean, streaming: Boolean, smoothedReward: Double): NotificationCopy {
+    fun notificationCopy(
+        connected: Boolean,
+        streaming: Boolean,
+        smoothedReward: Double,
+        trainingActive: Boolean = true,
+    ): NotificationCopy {
         if (!connected) {
             return NotificationCopy(
                 title = "Callibri NFB",
@@ -173,6 +186,13 @@ object SessionPolicy {
                 title = "Callibri NFB",
                 text = "Starting neurofeedback…",
                 detail = "Waiting for EEG",
+            )
+        }
+        if (!trainingActive) {
+            return NotificationCopy(
+                title = "Callibri NFB",
+                text = "Neurofeedback session active",
+                detail = "No active training bands",
             )
         }
         val percent = smoothedReward.roundToInt().coerceIn(0, 100)
@@ -198,14 +218,24 @@ object SessionPolicy {
         visualDimPercent: Int? = null,
         feedbackLowerBound: Double = FeedbackIntensity.DEFAULT_LOWER,
         feedbackUpperBound: Double = FeedbackIntensity.DEFAULT_UPPER,
+        trainingActive: Boolean = true,
     ): OverlayModel {
-        val shown = overlayReward(connected, streaming, smoothedReward)
-        val collapsed = if (shown == null) "--%" else "${shown.roundToInt().coerceIn(0, 100)}%"
+        val shown = overlayReward(connected, streaming, smoothedReward, trainingActive)
+        val idleBands = connected && streaming && !trainingActive
+        val collapsed = when {
+            idleBands -> "Off"
+            shown == null -> "--%"
+            else -> "${shown.roundToInt().coerceIn(0, 100)}%"
+        }
         return OverlayModel(
             collapsedReward = collapsed,
             callibriLabel = if (connected) "Connected" else "Disconnected",
             eegLabel = if (streaming) "Running" else "Stopped",
-            smoothedLabel = if (shown == null) "—" else String.format(Locale.US, "%.0f%%", shown),
+            smoothedLabel = when {
+                idleBands -> "No active training bands"
+                shown == null -> "—"
+                else -> String.format(Locale.US, "%.0f%%", shown)
+            },
             volumeLabel = String.format(Locale.US, "%.0f%%", volumePercent.coerceIn(0.0, 100.0)),
             elapsedLabel = String.format(Locale.US, "%.1f s", elapsedMillis.coerceAtLeast(0L) / 1000.0),
             electrodeLabel = electrode,

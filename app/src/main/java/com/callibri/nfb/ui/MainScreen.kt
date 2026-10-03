@@ -41,6 +41,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
@@ -207,6 +208,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         onMaxDim = viewModel::setMaxDimAlpha,
                         onFeedbackLower = viewModel::setFeedbackLowerBound,
                         onFeedbackUpper = viewModel::setFeedbackUpperBound,
+                        onBandEnabled = viewModel::setBandEnabled,
                     )
                 }
             }
@@ -325,6 +327,7 @@ private fun ConnectedSection(
     onMaxDim: (Double) -> Unit,
     onFeedbackLower: (Double) -> Unit,
     onFeedbackUpper: (Double) -> Unit,
+    onBandEnabled: (String, Boolean) -> Unit,
 ) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -370,9 +373,10 @@ private fun ConnectedSection(
         Switch(checked = ui.autoThreshold, onCheckedChange = onAutoChange)
     }
     Text(
-        "Edit the band edges, then apply them. Thresholds, weights, and smoothing apply separately.",
+        "Each band can be turned off without resetting its threshold. Edit the edges, then apply them. Thresholds, weights, and smoothing apply separately.",
         style = MaterialTheme.typography.bodySmall,
     )
+    Text("Active training components: ${ui.activeBandCount}")
     ui.bands.forEachIndexed { index, band ->
         BandCard(
             band = band,
@@ -382,6 +386,7 @@ private fun ConnectedSection(
             onTargetChange = { onTargetChange(band.id, it) },
             onWeightChange = { onWeightChange(band.id, it) },
             onManualChange = { onManualChange(band.id, it) },
+            onEnabledChange = { onBandEnabled(band.id, it) },
             onDone = if (index == ui.bands.lastIndex) onApply else null,
         )
     }
@@ -436,6 +441,7 @@ private fun RewardCard(
                 letterSpacing = 0.8.sp,
             )
             Text(ui.rewardStatus, style = MaterialTheme.typography.bodyMedium)
+            Text("Active training components: ${ui.activeBandCount}")
             Text(
                 if (ui.liveFeedbackActive) "Live feedback: active" else "Live feedback: inactive",
                 color = if (ui.liveFeedbackActive) {
@@ -445,12 +451,13 @@ private fun RewardCard(
                 },
                 fontWeight = FontWeight.Medium,
             )
+            val liveReward = ui.activeBandCount > 0
             Text(
-                formatPercent(ui.rewardSmoothed, decimals = 1),
-                style = MaterialTheme.typography.displaySmall,
+                if (liveReward) formatPercent(ui.rewardSmoothed, decimals = 1) else "No active training bands",
+                style = if (liveReward) MaterialTheme.typography.displaySmall else MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.SemiBold,
             )
-            val fraction = rewardFraction(ui.rewardSmoothed, ui.appliedMinReward)
+            val fraction = if (liveReward) rewardFraction(ui.rewardSmoothed, ui.appliedMinReward) else 0f
             LinearProgressIndicator(
                 progress = { fraction },
                 modifier = Modifier
@@ -464,8 +471,12 @@ private fun RewardCard(
                 Text(formatPercent(ui.appliedMinReward, decimals = 0))
                 Text("100%")
             }
-            Text("Raw combined reward: ${formatPercent(ui.rewardRaw, decimals = 1)}")
-            Text("Smoothed reward: ${formatPercent(ui.rewardSmoothed, decimals = 1)}")
+            Text(
+                "Raw combined reward: ${if (liveReward) formatPercent(ui.rewardRaw, decimals = 1) else "—"}",
+            )
+            Text(
+                "Smoothed reward: ${if (liveReward) formatPercent(ui.rewardSmoothed, decimals = 1) else "—"}",
+            )
             Text("Feedback volume: ${formatPercent(ui.feedbackVolumePercent, decimals = 1)}")
             if (ui.manualFeedback) {
                 Text(
@@ -728,7 +739,9 @@ private fun SessionDiagnostics(
     onManualPercent: (Double) -> Unit,
 ) {
     val commandReward = if (ui.manualFeedback) ui.feedbackVolumePercent else ui.rewardSmoothed
-    val meterLive = ui.phase == SessionPhase.Connected && ui.streaming
+    val meterLive = ui.phase == SessionPhase.Connected &&
+        ui.streaming &&
+        (ui.activeBandCount > 0 || ui.manualFeedback)
     val floatingFill = RewardMeter.displayedFraction(
         live = meterLive,
         smoothedReward = commandReward,
@@ -763,8 +776,10 @@ private fun SessionDiagnostics(
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-            Text("Raw combined reward: ${formatPercent(ui.rewardRaw, decimals = 1)}")
-            Text("Smoothed reward: ${formatPercent(ui.rewardSmoothed, decimals = 1)}")
+            val rewardShown = ui.activeBandCount > 0
+            Text("Active training components: ${ui.activeBandCount}")
+            Text("Raw combined reward: ${if (rewardShown) formatPercent(ui.rewardRaw, decimals = 1) else "—"}")
+            Text("Smoothed reward: ${if (rewardShown) formatPercent(ui.rewardSmoothed, decimals = 1) else "—"}")
             Text("Feedback lower bound: ${formatPercent(ui.feedbackLowerBound, decimals = 1)}")
             Text("Feedback upper bound: ${formatPercent(ui.feedbackUpperBound, decimals = 1)}")
             Text("Feedback intensity: ${"%.3f".format(Locale.US, ui.feedbackIntensity)}")
@@ -839,6 +854,16 @@ private fun SessionDiagnostics(
             Text("Elapsed EEG time: ${formatElapsed(ui.elapsedMillis)}")
             Text("Valid observations: ${ui.validObservations}")
             Text("Rejected observations: ${ui.rejectedObservations}")
+            ui.bands.forEach { band ->
+                Text(band.label, fontWeight = FontWeight.Medium)
+                Text("Enabled: ${if (band.enabled) "YES" else "NO"}")
+                Text("Direction: ${directionLabel(band.goal)}")
+                Text("Frequency range: ${formatHz(band.appliedLowHz)}–${formatHz(band.appliedHighHz)} Hz")
+                Text("Current amplitude: ${band.amplitudeUv?.let(::formatMicrovolts) ?: "—"}")
+                Text("Current threshold: ${band.thresholdUv?.let(::formatMicrovolts) ?: "—"}")
+                Text("Continuous band score: ${band.score?.let(::percentWhole) ?: "—"}")
+                Text("Included in combined reward: ${if (band.includedInReward) "YES" else "NO"}")
+            }
         }
     }
 }
@@ -852,21 +877,44 @@ private fun BandCard(
     onTargetChange: (String) -> Unit,
     onWeightChange: (String) -> Unit,
     onManualChange: (String) -> Unit,
+    onEnabledChange: (Boolean) -> Unit,
     onDone: (() -> Unit)?,
 ) {
+    val titleColor = if (band.enabled) {
+        MaterialTheme.colorScheme.onSurface
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(band.label.uppercase(Locale.US), fontWeight = FontWeight.SemiBold, letterSpacing = 0.6.sp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        band.label.uppercase(Locale.US),
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.6.sp,
+                        color = titleColor,
+                    )
+                    Text(
+                        if (band.enabled) goalLine(band.goal) else "Disabled",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = band.enabled, onCheckedChange = onEnabledChange)
+            }
+            Column(Modifier.alpha(if (band.enabled) 1f else 0.72f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                goalLine(band.goal),
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Text(
-                "Applied ${formatHz(band.appliedLowHz)}–${formatHz(band.appliedHighHz)} Hz",
+                "${formatHz(band.appliedLowHz)}–${formatHz(band.appliedHighHz)} Hz",
                 style = MaterialTheme.typography.bodyMedium,
+                color = titleColor,
             )
             Text("Current: ${band.amplitudeUv?.let(::formatMicrovolts) ?: "—"}")
-            if (band.amplitudeUv != null && !band.latestAccepted) {
+            if (band.enabled && band.amplitudeUv != null && !band.latestAccepted) {
                 Text(
                     "Latest reading was rejected. Scoring holds the previous valid amplitude.",
                     style = MaterialTheme.typography.bodySmall,
@@ -880,7 +928,17 @@ private fun BandCard(
                 },
             )
             Text("Target success: ${percentWhole(band.targetSuccess)}")
-            Text("Current normalized score: ${band.score?.let(::percentWhole) ?: "—"}")
+            Text(
+                if (band.enabled) {
+                    "Score: ${band.score?.let(::percentWhole) ?: "—"}"
+                } else {
+                    "Disabled"
+                },
+            )
+            Text("Continuous band score: ${band.score?.let(::percentWhole) ?: "—"}")
+            Text("Enabled: ${if (band.enabled) "YES" else "NO"}")
+            Text("Direction: ${directionLabel(band.goal)}")
+            Text("Included in combined reward: ${if (band.includedInReward) "YES" else "NO"}")
             Text("Window success: ${band.windowSuccess?.let(::percentWhole) ?: "—"}")
             Text(
                 "In window: ${band.validInWindow}",
@@ -947,6 +1005,7 @@ private fun BandCard(
                         imeAction = ImeAction.Next,
                     ),
                 )
+            }
             }
         }
     }
@@ -1123,4 +1182,9 @@ private fun rewardFraction(smoothed: Double, minPercent: Double): Float {
 private fun goalLine(goal: BandGoal): String = when (goal) {
     BandGoal.InhibitBelow -> "Goal: amplitude lower than threshold"
     BandGoal.RewardAbove -> "Goal: amplitude higher than threshold"
+}
+
+private fun directionLabel(goal: BandGoal): String = when (goal) {
+    BandGoal.InhibitBelow -> "INHIBIT"
+    BandGoal.RewardAbove -> "REWARD"
 }
