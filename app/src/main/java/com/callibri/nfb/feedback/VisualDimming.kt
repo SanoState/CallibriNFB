@@ -7,21 +7,21 @@ import android.view.WindowManager
 import kotlin.math.min
 
 /**
- * Maps the existing smoothed reward onto a black-overlay alpha.
+ * Maps feedback intensity onto a black-overlay alpha.
  * This is not a second reward smoother. Android display brightness is not involved.
  *
- * normalized = clamp((reward - 20) / 80, 0, 1)
- * alpha = selectedMaxDimAlpha * (1 - normalized)
+ * intensity = clamp((reward - lower) / (upper - lower), 0, 1)
+ * alpha = selectedMaxDimAlpha * (1 - intensity)
  */
 object VisualDimming {
     const val DEFAULT_MAX_ALPHA = 0.75
     const val MIN_SETTING = 0.10
 
-    fun normalized(rewardPercent: Double): Double {
-        val clamped = VolumeMapping.clampedPercent(rewardPercent)
-        val span = VolumeMapping.CEILING_PERCENT - VolumeMapping.FLOOR_PERCENT
-        return ((clamped - VolumeMapping.FLOOR_PERCENT) / span).coerceIn(0.0, 1.0)
-    }
+    fun normalized(
+        rewardPercent: Double,
+        lowerBound: Double = FeedbackIntensity.DEFAULT_LOWER,
+        upperBound: Double = FeedbackIntensity.DEFAULT_UPPER,
+    ): Double = FeedbackIntensity.intensity(rewardPercent, lowerBound, upperBound)
 
     /** Keeps the saved or slider value inside 10% and the device-safe ceiling. */
     fun clampSetting(maxDimAlpha: Double, safeMaximum: Double): Double {
@@ -29,10 +29,18 @@ object VisualDimming {
         return maxDimAlpha.coerceIn(MIN_SETTING, ceiling)
     }
 
-    fun alpha(rewardPercent: Double, selectedMaxDimAlpha: Double): Double {
+    fun alphaForIntensity(intensity: Double, selectedMaxDimAlpha: Double): Double {
         val maxDim = selectedMaxDimAlpha.coerceIn(0.0, TouchObscuringLimit.REQUESTED_CAP)
-        return (maxDim * (1.0 - normalized(rewardPercent))).coerceIn(0.0, maxDim)
+        val unit = if (intensity.isFinite()) intensity.coerceIn(0.0, 1.0) else 0.0
+        return (maxDim * (1.0 - unit)).coerceIn(0.0, maxDim)
     }
+
+    fun alpha(
+        rewardPercent: Double,
+        selectedMaxDimAlpha: Double,
+        lowerBound: Double = FeedbackIntensity.DEFAULT_LOWER,
+        upperBound: Double = FeedbackIntensity.DEFAULT_UPPER,
+    ): Double = alphaForIntensity(normalized(rewardPercent, lowerBound, upperBound), selectedMaxDimAlpha)
 }
 
 /**
@@ -83,7 +91,7 @@ object DimmingWindowSpec {
 }
 
 /**
- * Audio and visual are separate switches. Both read the same reward percent
+ * Audio and visual are separate switches. Both read the same feedback intensity
  * when they are on. Neither switch changes EEG.
  */
 object FeedbackModes {
@@ -95,9 +103,11 @@ object FeedbackModes {
         rewardReady: Boolean,
         rewardPercent: Double,
         maxDimAlpha: Double,
+        lowerBound: Double = FeedbackIntensity.DEFAULT_LOWER,
+        upperBound: Double = FeedbackIntensity.DEFAULT_UPPER,
     ): Double {
         if (!visualEnabled) return 0.0
         if (!manual && !rewardReady) return 0.0
-        return VisualDimming.alpha(rewardPercent, maxDimAlpha)
+        return VisualDimming.alpha(rewardPercent, maxDimAlpha, lowerBound, upperBound)
     }
 }

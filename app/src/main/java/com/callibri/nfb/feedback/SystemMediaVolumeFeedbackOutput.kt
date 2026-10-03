@@ -7,7 +7,9 @@ import android.os.Looper
 import android.os.SystemClock
 
 /**
- * STREAM_MUSIC feedback. 100% reward is the captured user ceiling.
+ * STREAM_MUSIC feedback. Full feedback intensity is the captured user ceiling.
+ * [applyGain] receives [FeedbackIntensity.audioGain], so
+ * `clamp(gain * 100)` lands on the existing 20–100 index map.
  * [flags] are always 0, so Android does not show the volume panel or play a click.
  */
 class SystemMediaVolumeFeedbackOutput(

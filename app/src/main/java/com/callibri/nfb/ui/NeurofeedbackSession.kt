@@ -17,6 +17,7 @@ import com.callibri.nfb.feedback.AndroidMediaStream
 import com.callibri.nfb.feedback.AudioFeedbackOutput
 import com.callibri.nfb.feedback.ExternalEngagement
 import com.callibri.nfb.feedback.FeedbackController
+import com.callibri.nfb.feedback.FeedbackIntensity
 import com.callibri.nfb.feedback.FeedbackModes
 import com.callibri.nfb.feedback.TouchObscuringLimit
 import com.callibri.nfb.feedback.VisualDimPreference
@@ -51,6 +52,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * The one live Callibri session for this process.
@@ -76,6 +78,11 @@ class NeurofeedbackSession(private val app: Application) {
     private val dimming = DimmingOverlay(app, safeMaxAlpha.toFloat())
     private val visualPrefs = VisualDimPreference(app)
     private var maxDimAlpha = visualPrefs.load(safeMaxAlpha)
+    private val storedRange = visualPrefs.loadRange()
+    @Volatile
+    private var feedbackLowerBound = storedRange.first
+    @Volatile
+    private var feedbackUpperBound = storedRange.second
     private var audioEnabled = false
     private var visualEnabled = false
     private var visualEpoch = 0
@@ -98,11 +105,19 @@ class NeurofeedbackSession(private val app: Application) {
             maxDimAlpha = maxDimAlpha,
             safeMaxDimAlpha = safeMaxAlpha,
             systemObscuringOpacity = systemObscuringOpacity?.toDouble(),
+            feedbackLowerBound = feedbackLowerBound,
+            feedbackUpperBound = feedbackUpperBound,
+            feedbackIntensity = FeedbackIntensity.intensity(
+                FRE1Protocol.MIN_REWARD_PERCENT,
+                feedbackLowerBound,
+                feedbackUpperBound,
+            ),
         ),
     )
     val ui: StateFlow<MainUiState> = _ui.asStateFlow()
 
     init {
+        feedback.setFeedbackRange(feedbackLowerBound, feedbackUpperBound)
         Log.i(
             TAG,
             "visual dim safe max %.3f (system obscuring %s)".format(
@@ -138,7 +153,7 @@ class NeurofeedbackSession(private val app: Application) {
             _ui.update { state ->
                 state.clearedSignal(autoOn = state.autoThreshold)
                     .withFeedback(snap)
-                    .withMedia(mediaGate.status(snap.requestedPercent), outputs.destination)
+                    .withMedia(mediaStatus(snap.requestedPercent), outputs.destination)
             }
         },
     )
@@ -211,7 +226,7 @@ class NeurofeedbackSession(private val app: Application) {
                 permissionsGranted = granted,
                 overlayPermissionGranted = Settings.canDrawOverlays(app),
                 notificationPermissionGranted = notificationsGranted(),
-            ).withMedia(mediaGate.status(it.feedbackVolumePercent), outputs.destination)
+            ).withMedia(mediaStatus(it.feedbackVolumePercent), outputs.destination)
         }
         manager.refreshRadioState()
     }
@@ -295,7 +310,7 @@ class NeurofeedbackSession(private val app: Application) {
         if (mediaGate.isFixed) {
             _ui.update {
                 it.copy(mediaNote = "External media feedback unavailable on this device.")
-                    .withMedia(mediaGate.status(it.feedbackVolumePercent), outputs.destination)
+                    .withMedia(mediaStatus(it.feedbackVolumePercent), outputs.destination)
             }
             return
         }
@@ -380,6 +395,37 @@ class NeurofeedbackSession(private val app: Application) {
         _ui.update { it.copy(maxDimAlpha = clamped) }
         if (visualEnabled) {
             pushVisual(currentFeedbackPercent(), _ui.value.rewardReady, _ui.value.manualFeedback)
+        }
+    }
+
+    fun setFeedbackLowerBound(lower: Double) {
+        if (!lower.isFinite()) return
+        val next = FeedbackIntensity.coerceLower(lower.roundToInt().toDouble(), feedbackUpperBound) ?: return
+        commitFeedbackRange(next, feedbackUpperBound)
+    }
+
+    fun setFeedbackUpperBound(upper: Double) {
+        if (!upper.isFinite()) return
+        val next = FeedbackIntensity.coerceUpper(feedbackLowerBound, upper.roundToInt().toDouble()) ?: return
+        commitFeedbackRange(feedbackLowerBound, next)
+    }
+
+    private fun commitFeedbackRange(lower: Double, upper: Double) {
+        if (!FeedbackIntensity.isValid(lower, upper)) return
+        if (lower == feedbackLowerBound && upper == feedbackUpperBound) return
+        val snap = feedback.setFeedbackRange(lower, upper)
+        feedbackLowerBound = lower
+        feedbackUpperBound = upper
+        visualPrefs.saveRange(lower, upper)
+        _ui.update { state ->
+            state.copy(
+                feedbackLowerBound = lower,
+                feedbackUpperBound = upper,
+            ).withFeedback(snap).withMedia(mediaStatus(snap.requestedPercent), outputs.destination)
+        }
+        if (visualEnabled) {
+            val state = _ui.value
+            pushVisual(currentFeedbackPercent(), state.rewardReady, state.manualFeedback)
         }
     }
 
@@ -712,7 +758,7 @@ class NeurofeedbackSession(private val app: Application) {
                 sampleRateHz = link.sampleRateHz,
                 linkMessage = link.message,
                 linkMessageIsError = link.messageIsError,
-            ).withMedia(mediaGate.status(current.feedbackVolumePercent), outputs.destination)
+            ).withMedia(mediaStatus(current.feedbackVolumePercent), outputs.destination)
         }
     }
 
@@ -720,14 +766,14 @@ class NeurofeedbackSession(private val app: Application) {
         _ui.update {
             it.withFeedback(snapshot)
                 .copy(audioFeedbackEnabled = audioEnabled)
-                .withMedia(mediaGate.status(snapshot.requestedPercent), outputs.destination)
+                .withMedia(mediaStatus(snapshot.requestedPercent), outputs.destination)
         }
     }
 
     private fun publishMedia(note: String? = _ui.value.mediaNote) {
         _ui.update {
             it.copy(mediaNote = note, audioFeedbackEnabled = audioEnabled)
-                .withMedia(mediaGate.status(it.feedbackVolumePercent), outputs.destination)
+                .withMedia(mediaStatus(it.feedbackVolumePercent), outputs.destination)
         }
     }
 
@@ -769,7 +815,7 @@ class NeurofeedbackSession(private val app: Application) {
                 latestRawUv = latestUv ?: snapshot.latestRawMicrovolts,
                 waveform = snapshot.waveform,
                 audioFeedbackEnabled = audioEnabled,
-            ).withMedia(mediaGate.status(heard.requestedPercent), outputs.destination)
+            ).withMedia(mediaStatus(heard.requestedPercent), outputs.destination)
         }
         if (!manual) pushVisual(reward.smoothedPercent, reward.rewardReady, manual = false, liveSample = true)
     }
@@ -792,7 +838,7 @@ class NeurofeedbackSession(private val app: Application) {
                 state.withReward(reward).withFeedback(heard)
             }
             next.copy(audioFeedbackEnabled = audioEnabled)
-                .withMedia(mediaGate.status(heard.requestedPercent), outputs.destination)
+                .withMedia(mediaStatus(heard.requestedPercent), outputs.destination)
         }
         if (!manual) pushVisual(reward.smoothedPercent, reward.rewardReady, manual = false, liveSample = true)
     }
@@ -813,6 +859,9 @@ class NeurofeedbackSession(private val app: Application) {
         return if (state.manualFeedback) state.feedbackVolumePercent else state.rewardSmoothed
     }
 
+    private fun mediaStatus(commandPercent: Double) =
+        mediaGate.status(commandPercent, feedbackLowerBound, feedbackUpperBound)
+
     private fun pushVisual(
         percent: Double,
         rewardReady: Boolean,
@@ -830,14 +879,17 @@ class NeurofeedbackSession(private val app: Application) {
             return
         }
         if (epoch != visualEpoch) return
+        val intensity = FeedbackIntensity.intensity(percent, feedbackLowerBound, feedbackUpperBound)
         val alpha = FeedbackModes.visualAlpha(
             visualEnabled = true,
             manual = manual,
             rewardReady = rewardReady,
             rewardPercent = percent,
             maxDimAlpha = maxDimAlpha,
+            lowerBound = feedbackLowerBound,
+            upperBound = feedbackUpperBound,
         )
-        val normalized = if (manual || rewardReady) VisualDimming.normalized(percent) else 0.0
+        val normalized = if (manual || rewardReady) intensity else 0.0
         noteVisualUpdate(alpha)
         dimming.setTargetAlpha(alpha)
         if (epoch != visualEpoch) {

@@ -163,10 +163,11 @@ class NeurofeedbackSessionService : Service() {
             session.noteOverlayPaint(visible = false, reward = null)
             return
         }
+        val commandReward = if (state.manualFeedback) state.feedbackVolumePercent else state.rewardSmoothed
         val model = SessionPolicy.overlayModel(
             connected = true,
             streaming = true,
-            smoothedReward = state.rewardSmoothed,
+            smoothedReward = commandReward,
             volumePercent = state.feedbackVolumePercent,
             elapsedMillis = state.elapsedMillis,
             electrode = electrodeLabel(state.electrode),
@@ -181,6 +182,8 @@ class NeurofeedbackSessionService : Service() {
             } else {
                 0
             },
+            feedbackLowerBound = state.feedbackLowerBound,
+            feedbackUpperBound = state.feedbackUpperBound,
         )
         val panel = overlay ?: FeedbackOverlay(
             context = applicationContext,

@@ -37,6 +37,7 @@ class SessionBackgroundTest {
 
         assertEquals(67.4, model.displayedReward)
         assertEquals("67%", model.collapsedReward)
+        assertEquals(0.0, model.barFraction, 1e-9)
         assertEquals(RewardMeter.fraction(67.4), model.barFraction, 1e-9)
         assertEquals("67%", model.smoothedLabel)
         assertEquals("Running", model.eegLabel)
@@ -45,12 +46,13 @@ class SessionBackgroundTest {
     @Test
     fun rewardMeterFillUsesTheActiveRange() {
         assertEquals(0.0, RewardMeter.fraction(20.0), 1e-9)
-        assertEquals(0.25, RewardMeter.fraction(40.0), 1e-9)
-        assertEquals(0.50, RewardMeter.fraction(60.0), 1e-9)
-        assertEquals(0.75, RewardMeter.fraction(80.0), 1e-9)
-        assertEquals(1.0, RewardMeter.fraction(100.0), 1e-9)
-        assertEquals(0.0, RewardMeter.fraction(0.0), 1e-9)
-        assertEquals(1.0, RewardMeter.fraction(140.0), 1e-9)
+        assertEquals(0.0, RewardMeter.fraction(60.0), 1e-9)
+        assertEquals(0.0, RewardMeter.fraction(70.0), 1e-9)
+        assertEquals(0.25, RewardMeter.fraction(75.0), 1e-9)
+        assertEquals(0.50, RewardMeter.fraction(80.0), 1e-9)
+        assertEquals(0.75, RewardMeter.fraction(85.0), 1e-9)
+        assertEquals(1.0, RewardMeter.fraction(90.0), 1e-9)
+        assertEquals(1.0, RewardMeter.fraction(95.0), 1e-9)
     }
 
     @Test
@@ -70,7 +72,7 @@ class SessionBackgroundTest {
         val visualOnly = model(audio = false, visual = true)
         val both = model(audio = true, visual = true)
         val neither = model(audio = false, visual = false)
-        assertEquals(0.50, audioOnly.barFraction, 1e-9)
+        assertEquals(0.0, audioOnly.barFraction, 1e-9)
         assertEquals(audioOnly.barFraction, visualOnly.barFraction, 0.0)
         assertEquals(audioOnly.barFraction, both.barFraction, 0.0)
         assertEquals(audioOnly.barFraction, neither.barFraction, 0.0)

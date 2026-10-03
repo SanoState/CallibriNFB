@@ -11,9 +11,13 @@ class VisualDimmingTest {
     fun defaultMaximumDarknessFollowsTheLinearMap() {
         assertEquals(0.75, VisualDimming.DEFAULT_MAX_ALPHA, 0.0)
         assertEquals(0.75, VisualDimming.alpha(20.0, 0.75), 1e-9)
-        assertEquals(0.5625, VisualDimming.alpha(40.0, 0.75), 1e-9)
-        assertEquals(0.375, VisualDimming.alpha(60.0, 0.75), 1e-9)
-        assertEquals(0.1875, VisualDimming.alpha(80.0, 0.75), 1e-9)
+        assertEquals(0.75, VisualDimming.alpha(40.0, 0.75), 1e-9)
+        assertEquals(0.75, VisualDimming.alpha(60.0, 0.75), 1e-9)
+        assertEquals(0.75, VisualDimming.alpha(70.0, 0.75), 1e-9)
+        assertEquals(0.5625, VisualDimming.alpha(75.0, 0.75), 1e-9)
+        assertEquals(0.375, VisualDimming.alpha(80.0, 0.75), 1e-9)
+        assertEquals(0.1875, VisualDimming.alpha(85.0, 0.75), 1e-9)
+        assertEquals(0.0, VisualDimming.alpha(90.0, 0.75), 1e-9)
         assertEquals(0.0, VisualDimming.alpha(100.0, 0.75), 1e-9)
     }
 
@@ -41,7 +45,9 @@ class VisualDimmingTest {
     @Test
     fun maxDimSettingIsRespectedAndCapped() {
         assertEquals(0.30, VisualDimming.alpha(20.0, 0.30), 1e-9)
-        assertEquals(0.15, VisualDimming.alpha(60.0, 0.30), 1e-9)
+        assertEquals(0.30, VisualDimming.alpha(60.0, 0.30), 1e-9)
+        assertEquals(0.15, VisualDimming.alpha(80.0, 0.30), 1e-9)
+        assertEquals(0.0, VisualDimming.alpha(90.0, 0.30), 1e-9)
         assertEquals(0.0, VisualDimming.alpha(100.0, 0.30), 1e-9)
         assertEquals(0.75, VisualDimming.alpha(20.0, 0.75), 1e-9)
         assertEquals(0.0, VisualDimming.alpha(100.0, 0.75), 1e-9)
@@ -84,17 +90,17 @@ class VisualDimmingTest {
             visualEnabled = true,
             manual = true,
             rewardReady = false,
-            rewardPercent = 40.0,
+            rewardPercent = 80.0,
             maxDimAlpha = 0.50,
         )
         val live = FeedbackModes.visualAlpha(
             visualEnabled = true,
             manual = false,
             rewardReady = true,
-            rewardPercent = 40.0,
+            rewardPercent = 80.0,
             maxDimAlpha = 0.50,
         )
-        assertEquals(0.375, manual, 1e-9)
+        assertEquals(0.25, manual, 1e-9)
         assertEquals(live, manual, 1e-9)
     }
 
@@ -118,7 +124,7 @@ class VisualDimmingTest {
     @Test
     fun audioOnlyLeavesTheScreenClear() {
         val mode = ModeProbe(audioEnabled = true, visualEnabled = false, eegStreaming = true, reward = 20.0)
-        assertEquals(VolumeMapping.linearGain(20.0), mode.audioGain())
+        assertEquals(FeedbackIntensity.audioGain(FeedbackIntensity.intensity(20.0)), mode.audioGain())
         assertEquals(0.0, mode.visualAlpha(), 0.0)
         assertTrue(mode.eegStreaming)
     }
@@ -133,10 +139,12 @@ class VisualDimmingTest {
 
     @Test
     fun combinedModeUsesOneRewardForBoth() {
-        val reward = 40.0
+        val reward = 76.0
         val mode = ModeProbe(audioEnabled = true, visualEnabled = true, eegStreaming = true, reward = reward)
-        assertEquals(VolumeMapping.linearGain(reward), mode.audioGain())
-        assertEquals(VisualDimming.alpha(reward, 0.50), mode.visualAlpha(), 1e-9)
+        val intensity = FeedbackIntensity.intensity(reward)
+        assertEquals(0.30, intensity, 1e-9)
+        assertEquals(FeedbackIntensity.audioGain(intensity), mode.audioGain())
+        assertEquals(VisualDimming.alphaForIntensity(intensity, mode.maxDim), mode.visualAlpha(), 1e-9)
         assertTrue(mode.eegStreaming)
     }
 
@@ -175,9 +183,15 @@ private data class ModeProbe(
     val maxDim: Double = 0.50,
     val rewardReady: Boolean = true,
     val manual: Boolean = false,
+    val lowerBound: Double = FeedbackIntensity.DEFAULT_LOWER,
+    val upperBound: Double = FeedbackIntensity.DEFAULT_UPPER,
 ) {
     fun audioGain(): Double? =
-        if (FeedbackModes.drivesAudio(audioEnabled)) VolumeMapping.linearGain(reward) else null
+        if (FeedbackModes.drivesAudio(audioEnabled)) {
+            FeedbackIntensity.audioGain(FeedbackIntensity.intensity(reward, lowerBound, upperBound))
+        } else {
+            null
+        }
 
     fun visualAlpha(): Double = FeedbackModes.visualAlpha(
         visualEnabled = visualEnabled,
@@ -185,5 +199,7 @@ private data class ModeProbe(
         rewardReady = rewardReady,
         rewardPercent = reward,
         maxDimAlpha = maxDim,
+        lowerBound = lowerBound,
+        upperBound = upperBound,
     )
 }

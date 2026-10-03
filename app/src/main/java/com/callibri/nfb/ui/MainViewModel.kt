@@ -7,6 +7,7 @@ import com.callibri.nfb.callibri.ElectrodeContact
 import com.callibri.nfb.callibri.SessionPhase
 import com.callibri.nfb.callibri.SignalIngress
 import com.callibri.nfb.feedback.FeedbackDestination
+import com.callibri.nfb.feedback.FeedbackIntensity
 import com.callibri.nfb.feedback.FeedbackSnapshot
 import com.callibri.nfb.feedback.MediaRestore
 import com.callibri.nfb.feedback.MediaVolumeStatus
@@ -117,6 +118,9 @@ data class MainUiState(
     val visualOverlayActive: Boolean = false,
     val visualUpdatesPerSecond: Int = 0,
     val visualNote: String? = null,
+    val feedbackLowerBound: Double = FeedbackIntensity.DEFAULT_LOWER,
+    val feedbackUpperBound: Double = FeedbackIntensity.DEFAULT_UPPER,
+    val feedbackIntensity: Double = 0.0,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -170,6 +174,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setVisualFeedbackEnabled(enabled: Boolean) = session.setVisualFeedbackEnabled(enabled)
 
     fun setMaxDimAlpha(alpha: Double) = session.setMaxDimAlpha(alpha)
+
+    fun setFeedbackLowerBound(lower: Double) = session.setFeedbackLowerBound(lower)
+
+    fun setFeedbackUpperBound(upper: Double) = session.setFeedbackUpperBound(upper)
 
     fun updateLow(id: String, text: String) = session.updateLow(id, text)
 
@@ -227,7 +235,14 @@ internal fun MainUiState.withFeedback(snapshot: FeedbackSnapshot): MainUiState =
     liveFeedbackActive = snapshot.liveActive,
     feedbackUpdatesPerSecond = snapshot.updatesPerSecond,
     audioFailure = snapshot.failure,
-)
+).withOutputMapping()
+
+internal fun MainUiState.withOutputMapping(): MainUiState {
+    val command = if (manualFeedback) feedbackVolumePercent else rewardSmoothed
+    return copy(
+        feedbackIntensity = FeedbackIntensity.intensity(command, feedbackLowerBound, feedbackUpperBound),
+    )
+}
 
 internal fun MainUiState.withReward(reward: RewardState): MainUiState = copy(
     rewardRaw = reward.rawPercent,
@@ -250,7 +265,7 @@ internal fun MainUiState.withReward(reward: RewardState): MainUiState = copy(
             latestAccepted = match.latestAccepted,
         )
     },
-)
+).withOutputMapping()
 
 internal fun MainUiState.clearedSignal(autoOn: Boolean): MainUiState {
     val windowSeconds = windowText.trim().toDoubleOrNull()?.toInt()?.coerceAtLeast(1)
@@ -276,7 +291,7 @@ internal fun MainUiState.clearedSignal(autoOn: Boolean): MainUiState {
                 latestAccepted = false,
             )
         },
-    )
+    ).withOutputMapping()
 }
 
 internal fun initialBands(): List<BandUi> {

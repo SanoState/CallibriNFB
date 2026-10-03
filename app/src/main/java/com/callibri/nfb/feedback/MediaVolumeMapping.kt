@@ -35,12 +35,25 @@ object MediaVolumeMapping {
         return (maxIndex * VolumeMapping.FLOOR_PERCENT / 100.0).roundToInt().coerceIn(1, maxIndex)
     }
 
+    /**
+     * Legacy 20–100 percent map. Kept so existing index assertions stay put.
+     * Live feedback does not call this with the raw reward. It converts
+     * [FeedbackIntensity.audioGain] back into a percent, which lands on the
+     * same index as [desiredIndexForIntensity].
+     */
     fun desiredIndex(rewardPercent: Double, maxIndex: Int): Int {
         if (maxIndex <= 0) return 0
-        val minimum = minimumIndex(maxIndex)
         val normalized = (VolumeMapping.clampedPercent(rewardPercent) - VolumeMapping.FLOOR_PERCENT) /
             (VolumeMapping.CEILING_PERCENT - VolumeMapping.FLOOR_PERCENT)
-        val raw = minimum + normalized.coerceIn(0.0, 1.0) * (maxIndex - minimum)
+        return desiredIndexForIntensity(normalized, maxIndex)
+    }
+
+    /** Index for a feedback intensity. 0 is [minimumIndex], 1 is [maxIndex]. */
+    fun desiredIndexForIntensity(intensity: Double, maxIndex: Int): Int {
+        if (maxIndex <= 0) return 0
+        val minimum = minimumIndex(maxIndex)
+        val unit = if (intensity.isFinite()) intensity.coerceIn(0.0, 1.0) else 0.0
+        val raw = minimum + unit * (maxIndex - minimum)
         return raw.roundToInt().coerceIn(minimum, maxIndex)
     }
 
@@ -172,12 +185,17 @@ class MediaVolumeGate(
         lastWriteMs = nowMs
     }
 
-    fun status(commandPercent: Double): MediaVolumeStatus = synchronized(lock) {
+    fun status(
+        commandPercent: Double,
+        lowerBound: Double = FeedbackIntensity.DEFAULT_LOWER,
+        upperBound: Double = FeedbackIntensity.DEFAULT_UPPER,
+    ): MediaVolumeStatus = synchronized(lock) {
         val deviceMax = if (port.isFixed) port.maxIndex().coerceAtLeast(0) else port.maxIndex().coerceAtLeast(0)
         val current = port.currentIndex().coerceAtLeast(0)
         val captured = capturedMaxIndex
         val minimum = captured?.let { MediaVolumeMapping.minimumIndex(it) }
-        val desired = captured?.let { MediaVolumeMapping.desiredIndex(commandPercent, it) }
+        val intensity = FeedbackIntensity.intensity(commandPercent, lowerBound, upperBound)
+        val desired = captured?.let { MediaVolumeMapping.desiredIndexForIntensity(intensity, it) }
         val steps = captured?.let { MediaVolumeMapping.stepCount(it) }
         val levelSpan = captured ?: deviceMax
         MediaVolumeStatus(

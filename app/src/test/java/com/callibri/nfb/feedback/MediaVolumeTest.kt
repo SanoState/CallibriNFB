@@ -42,6 +42,20 @@ class MediaVolumeTest {
     }
 
     @Test
+    fun statusDesiredIndexUsesFeedbackIntensityOfTheRawReward() {
+        val port = FakeStream(max = 10, current = 10)
+        val gate = MediaVolumeGate(port)
+        gate.captureCurrentAsMaximum()
+        assertEquals(6, gate.status(80.0, lowerBound = 70.0, upperBound = 90.0).desiredIndex)
+        assertEquals(2, gate.status(60.0, lowerBound = 70.0, upperBound = 90.0).desiredIndex)
+        assertEquals(6, gate.status(80.0, lowerBound = 60.0, upperBound = 100.0).desiredIndex)
+        assertEquals(
+            MediaVolumeMapping.desiredIndexForIntensity(0.5, 10),
+            gate.status(80.0, 70.0, 90.0).desiredIndex,
+        )
+    }
+
+    @Test
     fun capturedMaximumOf10MapsTheRewardRange() {
         assertEquals(2, MediaVolumeMapping.desiredIndex(20.0, 10))
         assertEquals(6, MediaVolumeMapping.desiredIndex(60.0, 10))
@@ -182,7 +196,7 @@ class MediaVolumeTest {
         controller.setManualEnabled(true)
         assertEquals(2, port.current)
 
-        controller.setManualPercent(60.0)
+        controller.setManualPercent(80.0)
         assertEquals(6, port.current)
         controller.setManualPercent(100.0)
         assertEquals(10, port.current)
@@ -206,7 +220,7 @@ class MediaVolumeTest {
         val output = GateOutput(gate)
         output.rewardReady = true
         val controller = FeedbackController(output)
-        controller.setLiveReward(60.0, timeMs = 1_000L, active = true)
+        controller.setLiveReward(80.0, timeMs = 1_000L, active = true)
         controller.startAudio()
         assertEquals(9, port.current)
     }

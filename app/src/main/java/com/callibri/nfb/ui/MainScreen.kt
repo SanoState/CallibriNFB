@@ -51,8 +51,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.callibri.nfb.feedback.FeedbackDestination
+import com.callibri.nfb.feedback.FeedbackIntensity
 import com.callibri.nfb.feedback.MediaRestore
-import com.callibri.nfb.feedback.VolumeMapping
+import com.callibri.nfb.session.RewardMeter
 import com.callibri.nfb.protocol.BandGoal
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -204,6 +205,8 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         onAudioFeedback = viewModel::setAudioFeedbackEnabled,
                         onVisualFeedback = viewModel::setVisualFeedbackEnabled,
                         onMaxDim = viewModel::setMaxDimAlpha,
+                        onFeedbackLower = viewModel::setFeedbackLowerBound,
+                        onFeedbackUpper = viewModel::setFeedbackUpperBound,
                     )
                 }
             }
@@ -320,6 +323,8 @@ private fun ConnectedSection(
     onAudioFeedback: (Boolean) -> Unit,
     onVisualFeedback: (Boolean) -> Unit,
     onMaxDim: (Double) -> Unit,
+    onFeedbackLower: (Double) -> Unit,
+    onFeedbackUpper: (Double) -> Unit,
 ) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -353,6 +358,8 @@ private fun ConnectedSection(
         onAudioFeedback = onAudioFeedback,
         onVisualFeedback = onVisualFeedback,
         onMaxDim = onMaxDim,
+        onFeedbackLower = onFeedbackLower,
+        onFeedbackUpper = onFeedbackUpper,
     )
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -505,8 +512,13 @@ private fun ExternalMediaCard(
     onAudioFeedback: (Boolean) -> Unit,
     onVisualFeedback: (Boolean) -> Unit,
     onMaxDim: (Double) -> Unit,
+    onFeedbackLower: (Double) -> Unit,
+    onFeedbackUpper: (Double) -> Unit,
 ) {
     val external = ui.feedbackDestination == FeedbackDestination.ExternalMedia
+    val currentReward = if (ui.manualFeedback) ui.feedbackVolumePercent else ui.rewardSmoothed
+    val lowerSlider = ui.feedbackLowerBound.toFloat().coerceIn(0f, 99f)
+    val upperSlider = ui.feedbackUpperBound.toFloat().coerceIn((lowerSlider + 1f).coerceAtMost(100f), 100f)
     val audioLevel = when {
         !ui.audioFeedbackEnabled -> "off"
         external && ui.mediaLevelPercent != null -> "${ui.mediaLevelPercent}%"
@@ -517,7 +529,28 @@ private fun ExternalMediaCard(
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Feedback output", fontWeight = FontWeight.Medium)
             Text(
-                "Audio and visual use the same smoothed reward. Either one can be on by itself.",
+                "Audio, visual dimming, and the floating bar share one feedback intensity. Either switch can be on by itself. The smoothed reward itself does not change.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text("Feedback range", fontWeight = FontWeight.Medium)
+            Text("Lower: ${formatPercent(ui.feedbackLowerBound, decimals = 0)}")
+            Slider(
+                value = lowerSlider.coerceIn(0f, (upperSlider - 1f).coerceIn(0f, 99f)),
+                onValueChange = { onFeedbackLower(it.toDouble()) },
+                valueRange = 0f..(upperSlider - 1f).coerceIn(0f, 99f),
+            )
+            Text("Upper: ${formatPercent(ui.feedbackUpperBound, decimals = 0)}")
+            Slider(
+                value = upperSlider.coerceIn((lowerSlider + 1f).coerceIn(1f, 100f), 100f),
+                onValueChange = { onFeedbackUpper(it.toDouble()) },
+                valueRange = (lowerSlider + 1f).coerceIn(1f, 100f)..100f,
+            )
+            Text("Current reward: ${formatPercent(currentReward, decimals = 1)}")
+            Text(
+                "Feedback intensity: ${"%.3f".format(Locale.US, ui.feedbackIntensity)}",
+            )
+            Text(
+                "Rewards at the lower bound are quiet and darkest. Rewards at the upper bound are loudest and clear.",
                 style = MaterialTheme.typography.bodySmall,
             )
             Row(
@@ -559,7 +592,7 @@ private fun ExternalMediaCard(
                 Text("Set current volume as maximum")
             }
             Text(
-                "100% reward uses that captured step, not the phone's loudest step. Hardware volume buttons do not raise the ceiling.",
+                "The top of the feedback range uses that captured step, not the phone's loudest step. Hardware volume buttons do not raise the ceiling.",
                 style = MaterialTheme.typography.bodySmall,
             )
             ui.mediaNote?.let { note ->
@@ -694,6 +727,14 @@ private fun SessionDiagnostics(
     onManualFeedback: (Boolean) -> Unit,
     onManualPercent: (Double) -> Unit,
 ) {
+    val commandReward = if (ui.manualFeedback) ui.feedbackVolumePercent else ui.rewardSmoothed
+    val meterLive = ui.phase == SessionPhase.Connected && ui.streaming
+    val floatingFill = RewardMeter.displayedFraction(
+        live = meterLive,
+        smoothedReward = commandReward,
+        lowerBound = ui.feedbackLowerBound,
+        upperBound = ui.feedbackUpperBound,
+    )
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("Session diagnostics", fontWeight = FontWeight.Medium)
@@ -718,12 +759,18 @@ private fun SessionDiagnostics(
                     steps = 79,
                 )
                 Text(
-                    "20% is quiet and darkest, 100% is full and clear. The tone's pitch does not change. With Manual test on, this slider drives every feedback output that is enabled.",
+                    "The slider is a simulated reward. Quiet and dark start at the feedback range's lower bound, and full and clear start at its upper bound. The tone's pitch does not change. With Manual test on, this slider drives every feedback output that is enabled.",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
             Text("Raw combined reward: ${formatPercent(ui.rewardRaw, decimals = 1)}")
             Text("Smoothed reward: ${formatPercent(ui.rewardSmoothed, decimals = 1)}")
+            Text("Feedback lower bound: ${formatPercent(ui.feedbackLowerBound, decimals = 1)}")
+            Text("Feedback upper bound: ${formatPercent(ui.feedbackUpperBound, decimals = 1)}")
+            Text("Feedback intensity: ${"%.3f".format(Locale.US, ui.feedbackIntensity)}")
+            Text("Audio target: ${formatGain(FeedbackIntensity.audioGain(ui.feedbackIntensity))}")
+            Text("Visual alpha: ${"%.3f".format(Locale.US, ui.visualAppliedAlpha)}")
+            Text("Floating bar fill: ${"%.3f".format(Locale.US, floatingFill)}")
             Text("Requested feedback volume: ${formatPercent(ui.feedbackVolumePercent, decimals = 1)}")
             Text("Audio player volume: ${formatGain(ui.playerVolume)}")
             Text("Manual test: ${if (ui.manualFeedback) "ON" else "OFF"}")
@@ -780,7 +827,7 @@ private fun SessionDiagnostics(
             Text("Desired index: ${ui.mediaDesiredIndex?.toString() ?: "—"}")
             Text("Last applied index: ${ui.mediaLastAppliedIndex?.toString() ?: "—"}")
             Text("Actual media index: ${ui.mediaCurrentIndex}")
-            Text("Requested gain: ${formatGain(VolumeMapping.linearGain(ui.feedbackVolumePercent))}")
+            Text("Requested gain: ${formatGain(FeedbackIntensity.audioGain(ui.feedbackIntensity))}")
             Text("Available feedback steps: ${ui.mediaStepCount?.toString() ?: "—"}")
             Text("Raw reward: ${formatPercent(ui.rewardRaw, decimals = 1)}")
             Text("Manual override: ${if (ui.manualFeedback) "ON" else "OFF"}")

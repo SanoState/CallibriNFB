@@ -1,6 +1,7 @@
 package com.callibri.nfb.session
 
 import com.callibri.nfb.callibri.SessionPhase
+import com.callibri.nfb.feedback.FeedbackIntensity
 import java.util.Locale
 import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -195,6 +196,8 @@ object SessionPolicy {
         audioOn: Boolean = false,
         visualOn: Boolean = false,
         visualDimPercent: Int? = null,
+        feedbackLowerBound: Double = FeedbackIntensity.DEFAULT_LOWER,
+        feedbackUpperBound: Double = FeedbackIntensity.DEFAULT_UPPER,
     ): OverlayModel {
         val shown = overlayReward(connected, streaming, smoothedReward)
         val collapsed = if (shown == null) "--%" else "${shown.roundToInt().coerceIn(0, 100)}%"
@@ -212,7 +215,12 @@ object SessionPolicy {
             audioOn = audioOn,
             visualOn = visualOn,
             visualDimLabel = visualDimPercent?.let { "$it%" } ?: "—",
-            barFraction = RewardMeter.displayedFraction(live = shown != null, smoothedReward = smoothedReward),
+            barFraction = RewardMeter.displayedFraction(
+                live = shown != null,
+                smoothedReward = smoothedReward,
+                lowerBound = feedbackLowerBound,
+                upperBound = feedbackUpperBound,
+            ),
             dotArgb = when {
                 connected && streaming -> 0xFF3DDC97.toInt()
                 connected -> 0xFFE0B15A.toInt()
