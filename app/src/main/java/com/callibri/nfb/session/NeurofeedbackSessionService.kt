@@ -191,12 +191,17 @@ class NeurofeedbackSessionService : Service() {
             onToggleVisual = { session.setVisualFeedbackEnabled(!session.ui.value.visualFeedbackEnabled) },
         ).also { overlay = it }
         val shown = panel.render(model)
-        if (shown && session.dimmingAttached()) {
-            val generation = session.dimmingGeneration()
-            if (generation != raisedDimmingGeneration) {
-                panel.bringToFront()
-                raisedDimmingGeneration = generation
-            }
+        val dimmingGeneration = session.dimmingGeneration()
+        if (
+            shown &&
+            SessionPolicy.shouldRaiseRewardMeter(
+                dimmingAttached = session.dimmingAttached(),
+                dimmingGeneration = dimmingGeneration,
+                alreadyRaisedGeneration = raisedDimmingGeneration,
+            )
+        ) {
+            panel.bringToFront()
+            raisedDimmingGeneration = dimmingGeneration
         }
         if (!shown) session.noteOverlayPermissionDenied()
         session.noteOverlayPaint(

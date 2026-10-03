@@ -102,6 +102,8 @@ data class OverlayModel(
     val audioOn: Boolean = false,
     val visualOn: Boolean = false,
     val visualDimLabel: String = "—",
+    /** 0 when feedback is not live, so a stale reward cannot keep the bar filled. */
+    val barFraction: Double = 0.0,
 )
 
 object SessionPolicy {
@@ -109,6 +111,16 @@ object SessionPolicy {
     fun shouldStartForegroundService(explicitEegStart: Boolean): Boolean = explicitEegStart
 
     fun presentActiveReward(connected: Boolean, streaming: Boolean): Boolean = connected && streaming
+
+    /**
+     * The reward meter is its own window. Raise it once each time the dim layer
+     * is added so the meter stays above that full-screen black overlay.
+     */
+    fun shouldRaiseRewardMeter(
+        dimmingAttached: Boolean,
+        dimmingGeneration: Int,
+        alreadyRaisedGeneration: Int,
+    ): Boolean = dimmingAttached && dimmingGeneration != alreadyRaisedGeneration
 
     /** The overlay prints the existing smoothed reward, and only while feedback is live. */
     fun overlayReward(connected: Boolean, streaming: Boolean, smoothedReward: Double): Double? =
@@ -185,7 +197,7 @@ object SessionPolicy {
         visualDimPercent: Int? = null,
     ): OverlayModel {
         val shown = overlayReward(connected, streaming, smoothedReward)
-        val collapsed = if (shown == null) "—" else "${shown.roundToInt().coerceIn(0, 100)}%"
+        val collapsed = if (shown == null) "--%" else "${shown.roundToInt().coerceIn(0, 100)}%"
         return OverlayModel(
             collapsedReward = collapsed,
             callibriLabel = if (connected) "Connected" else "Disconnected",
@@ -200,6 +212,7 @@ object SessionPolicy {
             audioOn = audioOn,
             visualOn = visualOn,
             visualDimLabel = visualDimPercent?.let { "$it%" } ?: "—",
+            barFraction = RewardMeter.displayedFraction(live = shown != null, smoothedReward = smoothedReward),
             dotArgb = when {
                 connected && streaming -> 0xFF3DDC97.toInt()
                 connected -> 0xFFE0B15A.toInt()

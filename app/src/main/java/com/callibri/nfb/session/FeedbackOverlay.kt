@@ -2,6 +2,8 @@ package com.callibri.nfb.session
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -33,6 +35,8 @@ class FeedbackOverlay(
     private var params: WindowManager.LayoutParams? = null
     private var expandedPanel: LinearLayout? = null
     private var rewardView: TextView? = null
+    private var collapsedBar: RewardBarView? = null
+    private var expandedBar: RewardBarView? = null
     private var dotView: TextView? = null
     private var callibriView: TextView? = null
     private var eegView: TextView? = null
@@ -98,7 +102,11 @@ class FeedbackOverlay(
             return false
         }
         dotView?.setTextColor(model.dotArgb)
+        val live = model.displayedReward != null
+        collapsedBar?.setFraction(model.barFraction)
+        expandedBar?.setFraction(model.barFraction)
         rewardView?.text = model.collapsedReward
+        rewardView?.setTextColor(if (live) 0xFFFFFFFF.toInt() else 0xFFD3EBE7.toInt())
         callibriView?.text = "Callibri: ${model.callibriLabel}"
         eegView?.text = "EEG: ${model.eegLabel}"
         smoothedView?.text = "Smoothed reward: ${model.smoothedLabel}"
@@ -124,33 +132,34 @@ class FeedbackOverlay(
         if (root != null) return
         val panel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setPadding(dp(8), dp(6), dp(8), dp(6))
             background = cardBackground()
             elevation = 8f * density
         }
+        val drag = dragListener()
         val header = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(32)
+            setOnTouchListener(drag)
         }
-        val dot = text("●", 18f, bold = true)
-        val reward = text("—", 20f, bold = true).apply {
-            setPadding(dp(8), 0, dp(8), 0)
+        val dot = text("●", 14f, bold = true)
+        val label = text("NFB", 13f, bold = true).apply {
+            setPadding(dp(6), 0, dp(6), 0)
         }
-        val caption = text("NFB", 11f, bold = false).apply {
-            setTextColor(0xFFD3EBE7.toInt())
+        val meter = RewardBarView(context)
+        val reward = text("--%", 14f, bold = true).apply {
+            minEms = 3
+            gravity = Gravity.END
         }
-        val titles = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(reward)
-            addView(caption)
-        }
-        val stop = chip("Stop")
-        stop.setOnClickListener { onStop() }
         header.addView(dot)
-        header.addView(titles, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        header.addView(stop)
-        titles.setOnTouchListener(dragListener())
-        dot.setOnTouchListener(dragListener())
+        header.addView(label)
+        header.addView(meter, LinearLayout.LayoutParams(dp(72), dp(10)))
+        header.addView(reward)
+        dot.setOnTouchListener(drag)
+        label.setOnTouchListener(drag)
+        meter.setOnTouchListener(drag)
+        reward.setOnTouchListener(drag)
 
         val details = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -190,6 +199,13 @@ class FeedbackOverlay(
         val collapse = chip("Collapse").apply {
             setOnClickListener { setExpanded(false) }
         }
+        val expandedMeter = RewardBarView(context)
+        details.addView(
+            expandedMeter,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(14)).apply {
+                bottomMargin = dp(8)
+            },
+        )
         details.addView(callibri)
         details.addView(eeg)
         details.addView(smoothed)
@@ -230,6 +246,8 @@ class FeedbackOverlay(
         params = layout
         expandedPanel = details
         rewardView = reward
+        collapsedBar = meter
+        expandedBar = expandedMeter
         dotView = dot
         callibriView = callibri
         eegView = eeg
@@ -340,5 +358,35 @@ class FeedbackOverlay(
 
     private companion object {
         const val TAG = "CallibriNFB"
+    }
+}
+
+/**
+ * Display-only track. Touches are not handled here, so the overlay can drag
+ * from the bar without treating it as a slider.
+ */
+private class RewardBarView(context: Context) : View(context) {
+    private var fraction = 0f
+    private val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF234E4A.toInt() }
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF3DDC97.toInt() }
+
+    init {
+        isClickable = false
+        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+    }
+
+    fun setFraction(value: Double) {
+        val next = value.toFloat().coerceIn(0f, 1f)
+        if (next == fraction) return
+        fraction = next
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val radius = height / 2f
+        canvas.drawRoundRect(0f, 0f, width.toFloat(), height.toFloat(), radius, radius, trackPaint)
+        val fillWidth = width * fraction
+        if (fillWidth <= 0.5f) return
+        canvas.drawRoundRect(0f, 0f, fillWidth, height.toFloat(), radius, radius, fillPaint)
     }
 }
